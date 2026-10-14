@@ -11,6 +11,7 @@
 mod api;
 mod app;
 mod player;
+mod session;
 mod ui;
 
 use api::ApiClient;
@@ -20,13 +21,17 @@ use libadwaita as adw;
 const APP_ID: &str = "org.flexmedia.FlexClient";
 
 fn main() -> anyhow::Result<()> {
-    let server = match parse_args() {
-        Ok(server) => server,
+    let (server, should_logout) = match parse_args() {
+        Ok(opts) => opts,
         Err(exit) => {
             print!("{}", exit.message);
             std::process::exit(exit.code);
         }
     };
+
+    if should_logout {
+        let _ = session::clear();
+    }
 
     // Networking runs on a dedicated Tokio runtime. Move the runtime into a
     // parked thread so it (and its worker pool) outlive `main`'s scope.
@@ -41,11 +46,29 @@ fn main() -> anyhow::Result<()> {
             std::thread::park();
         })?;
 
-    let api = ApiClient::new(server, handle);
+    // Try to load stored session if it matches server
+    let stored_session = session::load().ok().flatten();
+    let effective_server = if let Some(ref sess) = stored_session {
+        if sess.server_url == server {
+            sess.server_url.clone()
+        } else {
+            server.clone()
+        }
+    } else {
+        server.clone()
+    };
+
+    let api = ApiClient::new(effective_server, handle.clone());
+    if let Some(sess) = stored_session {
+        if sess.server_url == server {
+            api.set_token(Some(sess.token.clone()));
+        }
+    }
 
     let app = adw::Application::builder().application_id(APP_ID).build();
+    let api_clone = api.clone();
     app.connect_activate(move |app| {
-        let window = app::build_ui(app, api.clone());
+        let window = app::build_ui(app, api_clone.clone());
         window.present();
     });
 
@@ -63,36 +86,55 @@ struct EarlyExit {
     message: String,
 }
 
-fn parse_args() -> Result<String, EarlyExit> {
+fn parse_args() -> Result<(String, bool), EarlyExit> {
     let mut args = std::env::args().skip(1);
-    if let Some(arg) = args.next() {
-        return match arg.as_str() {
-            "-h" | "--help" => Err(EarlyExit {
-                code: 0,
-                message: help_text(),
-            }),
-            "--version" => Err(EarlyExit {
-                code: 0,
-                message: format!("flex-client {}\n", env!("CARGO_PKG_VERSION")),
-            }),
+    let mut logout = false;
+    let mut server: Option<String> = None;
+
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "-h" | "--help" => {
+                return Err(EarlyExit {
+                    code: 0,
+                    message: help_text(),
+                })
+            }
+            "--version" => {
+                return Err(EarlyExit {
+                    code: 0,
+                    message: format!("flex-client {}\n", env!("CARGO_PKG_VERSION")),
+                })
+            }
+            "--logout" => {
+                logout = true;
+            }
             "--server" => {
                 let value = args.next().ok_or_else(|| EarlyExit {
                     code: 2,
                     message: "--server requires a URL argument\n".to_string(),
                 })?;
-                Ok(value)
+                server = Some(value);
             }
             _ => match arg.strip_prefix("--server=") {
-                Some(value) => Ok(value.to_string()),
-                None => Err(EarlyExit {
-                    code: 2,
-                    message: format!("unknown argument: {arg}\n{}", help_text()),
-                }),
+                Some(value) => {
+                    server = Some(value.to_string());
+                }
+                None => {
+                    return Err(EarlyExit {
+                        code: 2,
+                        message: format!("unknown argument: {arg}\n{}", help_text()),
+                    })
+                }
             },
-        };
+        }
     }
-    Ok(std::env::var("FLEX_SERVER")
-        .unwrap_or_else(|_| format!("http://127.0.0.1:{}", flex_protocol::DEFAULT_PORT)))
+
+    let server = match server {
+        Some(s) => s,
+        None => std::env::var("FLEX_SERVER")
+            .unwrap_or_else(|_| format!("http://127.0.0.1:{}", flex_protocol::DEFAULT_PORT)),
+    };
+    Ok((server, logout))
 }
 
 fn help_text() -> String {
@@ -105,10 +147,11 @@ fn help_text() -> String {
          \x20   flex-client [OPTIONS]\n\
          \n\
          OPTIONS:\n\
-         \x20   --server <URL>    Flex server base URL (env: FLEX_SERVER)\n\
-         \x20                     [default: http://127.0.0.1:{port}]\n\
-         \x20   -h, --help        Print this help\n\
-         \x20   --version         Print the version\n",
+          \x20   --server <URL>    Flex server base URL (env: FLEX_SERVER)\n\
+          \x20                     [default: http://127.0.0.1:{port}]\n\
+          \x20   --logout          Clear stored session credentials\n\
+          \x20   -h, --help        Print this help\n\
+          \x20   --version         Print the version\n",
         version = env!("CARGO_PKG_VERSION"),
         port = flex_protocol::DEFAULT_PORT,
     )

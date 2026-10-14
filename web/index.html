@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Flex</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div id="login-view" class="login-view" hidden>
+    <form id="login-form" class="login-card" autocomplete="on">
+      <h1 class="brand">Flex</h1>
+      <p class="muted">Sign in to your media server</p>
+      <label>Server URL
+        <input id="server-input" type="text" placeholder="http://localhost:8096" autocomplete="url">
+      </label>
+      <label>Username
+        <input id="username-input" type="text" autocomplete="username" required>
+      </label>
+      <label>Password
+        <input id="password-input" type="password" autocomplete="current-password" required>
+      </label>
+      <label>Device name
+        <input id="device-input" type="text" placeholder="Web browser" autocomplete="off">
+      </label>
+      <button id="login-submit" class="primary" type="submit">Sign in</button>
+      <p id="login-error" class="error" hidden></p>
+    </form>
+  </div>
+
+  <div id="app-view" hidden>
+    <header class="topbar">
+      <div class="topbar-left">
+        <span class="brand">Flex</span>
+        <nav id="libraries" class="libraries"></nav>
+      </div>
+      <div class="topbar-right">
+        <input id="search-input" class="search" type="search" placeholder="Search titles…" autocomplete="off">
+        <span id="user-label" class="muted"></span>
+        <button id="logout-btn" class="ghost" type="button">Sign out</button>
+      </div>
+    </header>
+
+    <main class="content">
+      <section id="continue-section" class="row-section" hidden>
+        <h2>Continue watching</h2>
+        <div id="continue-row" class="continue-row"></div>
+      </section>
+
+      <section id="browse-section">
+        <h2 id="browse-heading">Browse</h2>
+        <p id="status" class="muted"></p>
+        <div id="grid" class="grid"></div>
+        <div class="load-more-wrap">
+          <button id="load-more" class="ghost" type="button" hidden>Load more</button>
+        </div>
+      </section>
+
+      <section id="detail-view" class="detail" hidden>
+        <button id="detail-back" class="ghost" type="button">← Back</button>
+        <div class="detail-hero">
+          <div class="detail-poster"><img id="detail-poster" alt=""></div>
+          <div class="detail-info">
+            <h1 id="detail-title"></h1>
+            <p id="detail-meta" class="muted"></p>
+            <p id="detail-overview"></p>
+            <div class="detail-actions">
+              <button id="detail-play" class="primary" type="button">Play</button>
+              <button id="detail-resume" class="primary" type="button" hidden></button>
+            </div>
+            <div class="tracks">
+              <div>
+                <h3>Audio</h3>
+                <ul id="detail-audio"></ul>
+              </div>
+              <div>
+                <h3>Subtitles</h3>
+                <ul id="detail-subs"></ul>
+                <button id="sub-search-btn" class="ghost" type="button">Search online subtitles</button>
+                <ul id="sub-search-results" class="sub-results"></ul>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div id="player-overlay" class="player-overlay" hidden>
+    <div class="player-bar">
+      <span id="player-title"></span>
+      <button id="player-close" class="ghost" type="button">Close</button>
+    </div>
+    <video id="player-video" class="player-video" controls autoplay playsinline></video>
+    <p id="player-status" class="muted"></p>
+  </div>
+
+  <div id="toast" class="toast" hidden></div>
+
+  <script src="vendor/hls.js" defer></script>
+  <script src="app.js" defer></script>
+</body>
+</html>

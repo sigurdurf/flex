@@ -11,6 +11,7 @@ mod model;
 mod playback;
 mod probe;
 mod scanner;
+mod subtitles;
 mod transcode;
 mod user;
 
@@ -140,6 +141,7 @@ async fn main() -> anyhow::Result<()> {
         rate_limiter: Arc::new(auth::LoginRateLimiter::new()),
         sessions: sessions.clone(),
         transcode: Arc::new(transcode_caps),
+        subtitles: Arc::new(subtitles::SubtitleRegistry::from_config(&config)),
     };
 
     tokio::spawn(gc_task(sessions));

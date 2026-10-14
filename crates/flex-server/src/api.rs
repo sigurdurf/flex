@@ -12,22 +12,25 @@ use axum::response::Response;
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use flex_protocol::{
-    CreateUserRequest, Device, Health, ItemQuery, Library, LoginRequest, LoginResponse, MediaItem,
-    Page, ScanReport, SubtitleStream, User, UserRole, API_VERSION,
+    ContinueWatchingEntry, CreateUserRequest, Device, Health, ItemQuery, Library, LoginRequest,
+    LoginResponse, MediaItem, Page, ScanReport, SubtitleStream, UpdateProgressRequest, User,
+    UserRole, WatchState, API_VERSION,
 };
 use serde::Deserialize;
 use sqlx::SqlitePool;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, SeekFrom};
 use tokio_util::io::ReaderStream;
 use tower_http::cors::CorsLayer;
+use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::TraceLayer;
 
 use crate::auth::{self, AdminUser, AuthUser, LoginRateLimiter, RateKey};
 use crate::config::Config;
 use crate::error::AppError;
 use crate::playback::{self, SessionManager, StreamAccess};
+use crate::subtitles::SubtitleRegistry;
 use crate::transcode::TranscodeCapabilities;
-use crate::{db, scanner};
+use crate::{db, scanner, subtitles};
 
 /// Shared application state.
 #[derive(Clone)]
@@ -40,6 +43,8 @@ pub struct AppState {
     pub sessions: Arc<SessionManager>,
     /// Probed `ffmpeg` capability set.
     pub transcode: Arc<TranscodeCapabilities>,
+    /// Configured online subtitle providers.
+    pub subtitles: Arc<SubtitleRegistry>,
 }
 
 /// Build the application router.
@@ -52,7 +57,7 @@ pub struct AppState {
 pub fn router(state: AppState) -> Router {
     let protected = protected_router(state.clone());
 
-    Router::new()
+    let mut router = Router::new()
         .route("/api/v1/health", get(health))
         .route("/api/v1/auth/login", post(login))
         // Scoped playback routes: authorised by `?t=<session_token>` rather than
@@ -68,7 +73,22 @@ pub fn router(state: AppState) -> Router {
         // Direct play uses a Range-capable file route that accepts either a
         // bearer token or a scoped direct-play session token.
         .route("/api/v1/items/{id}/stream", get(stream))
-        .merge(protected)
+        .merge(protected);
+
+    // Static web UI: unauthenticated fallback so unknown non-API paths return
+    // the SPA shell. Registered routes (including all of `/api/*`) win over the
+    // fallback because `fallback_service` only runs when nothing else matches.
+    match state.config.web_path() {
+        Some(web_dir) => {
+            let index = web_dir.join("index.html");
+            tracing::info!(dir = %web_dir.display(), "serving static web UI");
+            router =
+                router.fallback_service(ServeDir::new(web_dir).fallback(ServeFile::new(index)));
+        }
+        None => tracing::info!("no web/ directory found; static web UI disabled"),
+    }
+
+    router
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
         .with_state(state)
@@ -90,9 +110,23 @@ pub fn protected_router(state: AppState) -> Router<AppState> {
             "/api/v1/items/{id}/subtitles/{track}",
             get(get_subtitle_track),
         )
+        .route(
+            flex_protocol::subtitle_search_path().as_str(),
+            get(subtitles::search),
+        )
+        .route(
+            flex_protocol::subtitle_download_path().as_str(),
+            post(subtitles::download),
+        )
         .route("/api/v1/playback/start", post(playback::start))
         .route("/api/v1/playback/stop", post(playback::stop))
         .route("/api/v1/system/info", get(playback::system_info))
+        .route("/api/v1/continue-watching", get(continue_watching))
+        .route("/api/v1/progress", get(list_progress))
+        .route(
+            "/api/v1/progress/{item_id}",
+            get(get_progress).put(put_progress).delete(delete_progress),
+        )
         .route("/api/v1/auth/logout", post(logout))
         .route("/api/v1/auth/me", get(me))
         .route("/api/v1/auth/devices", get(list_devices))
@@ -270,6 +304,98 @@ async fn get_item(
         .await?
         .map(Json)
         .ok_or_else(|| AppError::not_found(format!("media item {id} not found")))
+}
+
+/// Pagination query for `GET /continue-watching`.
+#[derive(Debug, Deserialize)]
+struct ProgressQuery {
+    limit: Option<i64>,
+    offset: Option<i64>,
+}
+
+/// List the user's resumable items, most recently watched first.
+async fn continue_watching(
+    auth: AuthUser,
+    State(state): State<AppState>,
+    Query(query): Query<ProgressQuery>,
+) -> Result<Json<Page<ContinueWatchingEntry>>, AppError> {
+    let limit = query.limit.unwrap_or(20).clamp(1, 100);
+    let offset = query.offset.unwrap_or(0).max(0);
+    let page = db::list_continue_watching(&state.pool, auth.user.id, limit, offset).await?;
+    Ok(Json(page))
+}
+
+/// List every watch-state row for the user.
+async fn list_progress(
+    auth: AuthUser,
+    State(state): State<AppState>,
+) -> Result<Json<Vec<WatchState>>, AppError> {
+    Ok(Json(
+        db::list_watch_states(&state.pool, auth.user.id).await?,
+    ))
+}
+
+/// Fetch the user's watch state for one item.
+async fn get_progress(
+    auth: AuthUser,
+    State(state): State<AppState>,
+    Path(item_id): Path<i64>,
+) -> Result<Json<WatchState>, AppError> {
+    db::get_watch_state(&state.pool, auth.user.id, item_id)
+        .await?
+        .map(Json)
+        .ok_or_else(|| AppError::not_found(format!("no progress recorded for item {item_id}")))
+}
+
+/// Upsert the user's watch state for one item.
+///
+/// `watched` is honoured when supplied; otherwise it is inferred as `true` once
+/// the position reaches 90% of a known duration. The position is clamped to the
+/// duration when one is known.
+async fn put_progress(
+    auth: AuthUser,
+    State(state): State<AppState>,
+    Path(item_id): Path<i64>,
+    Json(request): Json<UpdateProgressRequest>,
+) -> Result<Json<WatchState>, AppError> {
+    if db::get_item(&state.pool, item_id).await?.is_none() {
+        return Err(AppError::not_found(format!(
+            "media item {item_id} not found"
+        )));
+    }
+
+    let existing = db::get_watch_state(&state.pool, auth.user.id, item_id).await?;
+    let duration = request
+        .duration_ms
+        .or_else(|| existing.as_ref().and_then(|state| state.duration_ms));
+    let position = db::clamp_position_ms(request.position_ms, duration);
+    let watched = request
+        .watched
+        .unwrap_or_else(|| db::infer_watched(position, duration));
+
+    let saved = db::upsert_watch_state(
+        &state.pool,
+        auth.user.id,
+        item_id,
+        position,
+        duration,
+        watched,
+        db::now_secs(),
+    )
+    .await?;
+    Ok(Json(saved))
+}
+
+/// Clear the user's watch state for one item.
+///
+/// Idempotent: returns `204` whether or not a row existed.
+async fn delete_progress(
+    auth: AuthUser,
+    State(state): State<AppState>,
+    Path(item_id): Path<i64>,
+) -> Result<StatusCode, AppError> {
+    db::delete_watch_state(&state.pool, auth.user.id, item_id).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// Parsed byte-range request.

@@ -295,6 +295,7 @@ mod tests {
                 2,
             )),
             transcode: Arc::new(crate::transcode::TranscodeCapabilities::default()),
+            subtitles: Arc::new(crate::subtitles::SubtitleRegistry::new()),
         }
     }
 

@@ -6,11 +6,15 @@
 
 use std::fmt::Display;
 use std::future::Future;
+use std::sync::{Arc, RwLock};
 
 use anyhow::{Context, Result};
 use flex_protocol::{
-    artwork_path, health_path, item_path, items_path, libraries_path, scan_path, stream_path,
-    Health, ItemQuery, Library, MediaItem, MediaKind, Page, ScanReport,
+    artwork_path, continue_watching_path, health_path, item_path, items_path, libraries_path,
+    login_path, logout_path, me_path, playback_start_path, playback_stop_path, progress_item_path,
+    scan_path, ContinueWatchingEntry, Health, ItemQuery, Library, LoginRequest, LoginResponse,
+    MediaItem, MediaKind, Page, PlaybackSession, PlaybackStartRequest, ScanReport,
+    StopPlaybackRequest, UpdateProgressRequest, User, WatchState,
 };
 use gtk4::glib;
 
@@ -81,13 +85,44 @@ pub fn build_query(query: &ItemQuery) -> String {
     params.join("&")
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApiErrorKind {
+    Unauthorized,
+}
+
+#[derive(Debug, Clone)]
+pub struct ApiError {
+    pub kind: ApiErrorKind,
+    pub message: String,
+}
+
+impl std::fmt::Display for ApiError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.message)
+    }
+}
+impl std::error::Error for ApiError {}
+
+/// Join a server-relative path onto a base URL.
+///
+/// The base is assumed to have no trailing slash (it is trimmed in
+/// [`ApiClient::new`]). Absolute URLs are returned unchanged, and the path's
+/// own query string (`?t=…`) is preserved verbatim.
+pub fn join_url(base: &str, path: &str) -> String {
+    if path.starts_with("http://") || path.starts_with("https://") {
+        return path.to_string();
+    }
+    format!("{}{}", base.trim_end_matches('/'), path)
+}
+
 /// Small convenience wrapper around [`reqwest::Client`] plus the Tokio runtime
 /// handle used to drive requests.
 #[derive(Clone)]
 pub struct ApiClient {
-    base: String,
+    base: Arc<RwLock<String>>,
     http: reqwest::Client,
     handle: tokio::runtime::Handle,
+    token: Arc<RwLock<Option<String>>>,
 }
 
 impl ApiClient {
@@ -95,29 +130,59 @@ impl ApiClient {
         let base = base.into();
         let base = base.trim_end_matches('/').to_string();
         Self {
-            base,
+            base: Arc::new(RwLock::new(base)),
             http: reqwest::Client::new(),
             handle,
+            token: Arc::new(RwLock::new(None)),
         }
     }
 
+    /// Replace the configured server base URL (used by the login page).
+    pub fn set_base(&self, base: impl Into<String>) {
+        let base = base.into();
+        *self.base.write().expect("base lock poisoned") = base.trim_end_matches('/').to_string();
+    }
+
+    pub fn set_token(&self, token: Option<String>) {
+        *self.token.write().expect("token lock poisoned") = token;
+    }
+
+    pub fn token(&self) -> Option<String> {
+        self.token.read().expect("token lock poisoned").clone()
+    }
+
+    pub fn clear_token(&self) {
+        self.set_token(None);
+    }
+
     /// Base server URL without a trailing slash.
-    pub fn base_url(&self) -> &str {
-        &self.base
+    pub fn base_url(&self) -> String {
+        self.base.read().expect("base lock poisoned").clone()
     }
 
     fn url(&self, path: &str) -> String {
-        format!("{}{}", self.base, path)
+        format!("{}{}", self.base_url(), path)
     }
 
-    /// Absolute URL for the range-capable byte stream of an item.
-    pub fn stream_url(&self, id: i64) -> String {
-        self.url(&stream_path(id))
+    fn add_auth(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        let token = self.token.read().expect("token lock poisoned").clone();
+        if let Some(token) = token {
+            req.bearer_auth(token)
+        } else {
+            req
+        }
+    }
+
+    /// Join a server-relative path (which may already carry a query string)
+    /// onto the configured base URL. Used to turn a `PlaybackSession.url` into
+    /// an absolute URL mpv can open.
+    pub fn absolute_url(&self, path: &str) -> String {
+        join_url(&self.base_url(), path)
     }
 
     /// Absolute URL for an item's artwork of the given type (`poster`/`backdrop`).
     pub fn artwork_url(&self, id: i64, kind: &str) -> String {
-        format!("{}{}?type={}", self.base, artwork_path(id), kind)
+        format!("{}{}?type={}", self.base_url(), artwork_path(id), kind)
     }
 
     pub async fn health(&self) -> Result<Health> {
@@ -132,8 +197,7 @@ impl ApiClient {
 
     pub async fn libraries(&self) -> Result<Vec<Library>> {
         let resp = self
-            .http
-            .get(self.url(&libraries_path()))
+            .add_auth(self.http.get(self.url(&libraries_path())))
             .send()
             .await
             .context("request to /libraries failed")?;
@@ -146,11 +210,10 @@ impl ApiClient {
         let url = if qs.is_empty() {
             self.url(&path)
         } else {
-            format!("{}{}?{}", self.base, path, qs)
+            format!("{}{}?{}", self.base_url(), path, qs)
         };
         let resp = self
-            .http
-            .get(url)
+            .add_auth(self.http.get(url))
             .send()
             .await
             .context("request to /items failed")?;
@@ -159,8 +222,7 @@ impl ApiClient {
 
     pub async fn item(&self, id: i64) -> Result<MediaItem> {
         let resp = self
-            .http
-            .get(self.url(&item_path(id)))
+            .add_auth(self.http.get(self.url(&item_path(id))))
             .send()
             .await
             .with_context(|| format!("request to /items/{id} failed"))?;
@@ -169,8 +231,7 @@ impl ApiClient {
 
     pub async fn scan(&self) -> Result<ScanReport> {
         let resp = self
-            .http
-            .post(self.url(&scan_path()))
+            .add_auth(self.http.post(self.url(&scan_path())))
             .send()
             .await
             .context("request to /scan failed")?;
@@ -181,8 +242,7 @@ impl ApiClient {
     /// (no artwork available).
     pub async fn artwork_bytes(&self, id: i64, kind: &str) -> Result<Option<Vec<u8>>> {
         let resp = self
-            .http
-            .get(self.artwork_url(id, kind))
+            .add_auth(self.http.get(self.artwork_url(id, kind)))
             .send()
             .await
             .with_context(|| format!("request for artwork of item {id} failed"))?;
@@ -194,6 +254,122 @@ impl ApiClient {
             .with_context(|| format!("artwork request for item {id} returned an error"))?;
         let bytes = resp.bytes().await.context("failed to read artwork bytes")?;
         Ok(Some(bytes.to_vec()))
+    }
+
+    /// Exchange credentials for a device token.
+    pub async fn login(
+        &self,
+        username: &str,
+        password: &str,
+        device_name: Option<&str>,
+    ) -> Result<LoginResponse> {
+        let body = LoginRequest {
+            username: username.to_string(),
+            password: password.to_string(),
+            device_name: device_name.map(|s| s.to_string()),
+        };
+        let resp = self
+            .http
+            .post(self.url(&login_path()))
+            .json(&body)
+            .send()
+            .await
+            .context("request to /auth/login failed")?;
+        parse_json(resp, "login").await
+    }
+
+    /// Revoke the current device token.
+    pub async fn logout(&self) -> Result<()> {
+        let resp = self
+            .add_auth(self.http.post(self.url(&logout_path())))
+            .send()
+            .await
+            .context("request to /auth/logout failed")?;
+        if !resp.status().is_success() && resp.status() != reqwest::StatusCode::UNAUTHORIZED {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            anyhow::bail!("server returned {status} for /auth/logout: {body}");
+        }
+        Ok(())
+    }
+
+    /// Fetch the authenticated user.
+    pub async fn me(&self) -> Result<User> {
+        let resp = self
+            .add_auth(self.http.get(self.url(&me_path())))
+            .send()
+            .await
+            .context("request to /auth/me failed")?;
+        parse_json(resp, "/auth/me").await
+    }
+
+    /// Start a playback session.
+    pub async fn playback_start(&self, request: &PlaybackStartRequest) -> Result<PlaybackSession> {
+        let resp = self
+            .add_auth(self.http.post(self.url(&playback_start_path())))
+            .json(request)
+            .send()
+            .await
+            .context("request to /playback/start failed")?;
+        parse_json(resp, "playback/start").await
+    }
+
+    /// Stop a playback session.
+    pub async fn playback_stop(&self, session_id: &str) -> Result<()> {
+        let body = StopPlaybackRequest {
+            session_id: session_id.to_string(),
+        };
+        let resp = self
+            .add_auth(self.http.post(self.url(&playback_stop_path())))
+            .json(&body)
+            .send()
+            .await
+            .context("request to /playback/stop failed")?;
+        if !resp.status().is_success() && resp.status() != reqwest::StatusCode::UNAUTHORIZED {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            anyhow::bail!("server returned {status} for /playback/stop: {body}");
+        }
+        Ok(())
+    }
+
+    /// Save playback progress for an item.
+    pub async fn update_progress(
+        &self,
+        item_id: i64,
+        request: &UpdateProgressRequest,
+    ) -> Result<WatchState> {
+        let resp = self
+            .add_auth(self.http.put(self.url(&progress_item_path(item_id))))
+            .json(request)
+            .send()
+            .await
+            .context("request to /progress failed")?;
+        parse_json(resp, "progress").await
+    }
+
+    /// Fetch saved progress for a single item, or `None` when there is none.
+    pub async fn progress_for_item(&self, item_id: i64) -> Result<Option<WatchState>> {
+        let resp = self
+            .add_auth(self.http.get(self.url(&progress_item_path(item_id))))
+            .send()
+            .await
+            .context("request to /progress failed")?;
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        Ok(Some(parse_json(resp, "progress").await?))
+    }
+
+    /// List resumable ("continue watching") entries.
+    pub async fn continue_watching(&self) -> Result<Vec<ContinueWatchingEntry>> {
+        let resp = self
+            .add_auth(self.http.get(self.url(&continue_watching_path())))
+            .send()
+            .await
+            .context("request to /continue-watching failed")?;
+        let page: Page<ContinueWatchingEntry> = parse_json(resp, "continue-watching").await?;
+        Ok(page.items)
     }
 
     /// Spawn `future` on the Tokio runtime and invoke `on_done` on the GTK main
@@ -215,11 +391,31 @@ impl ApiClient {
     }
 }
 
+#[allow(dead_code)]
+fn check_response(resp: reqwest::Response, _what: &str) -> Result<reqwest::Response> {
+    let status = resp.status();
+    if status == reqwest::StatusCode::UNAUTHORIZED {
+        let api_err = ApiError {
+            kind: ApiErrorKind::Unauthorized,
+            message: "unauthorized".to_string(),
+        };
+        return Err(anyhow::anyhow!(api_err));
+    }
+    Ok(resp)
+}
+
 async fn parse_json<T: serde::de::DeserializeOwned>(
     resp: reqwest::Response,
     what: &str,
 ) -> Result<T> {
     let status = resp.status();
+    if status == reqwest::StatusCode::UNAUTHORIZED {
+        let api_err = ApiError {
+            kind: ApiErrorKind::Unauthorized,
+            message: "unauthorized".to_string(),
+        };
+        anyhow::bail!(api_err);
+    }
     if !status.is_success() {
         let body = resp.text().await.unwrap_or_default();
         anyhow::bail!("server returned {status} for {what}: {body}");
@@ -270,5 +466,38 @@ mod tests {
             ..ItemQuery::default()
         };
         assert_eq!(build_query(&query), "");
+    }
+
+    #[test]
+    fn joins_base_and_session_path() {
+        assert_eq!(
+            join_url(
+                "http://127.0.0.1:8096",
+                "/api/v1/playback/abc/master.m3u8?t=tok"
+            ),
+            "http://127.0.0.1:8096/api/v1/playback/abc/master.m3u8?t=tok"
+        );
+        // Trailing slashes on the base are tolerated.
+        assert_eq!(join_url("http://host/", "/x"), "http://host/x");
+        // Absolute URLs pass through untouched.
+        assert_eq!(
+            join_url("http://host", "https://cdn.example/x.m3u8"),
+            "https://cdn.example/x.m3u8"
+        );
+    }
+
+    #[test]
+    fn session_url_absolute_join() {
+        let handle = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .handle()
+            .clone();
+        let api = ApiClient::new("http://127.0.0.1:8096/", handle);
+        assert_eq!(
+            api.absolute_url("/api/v1/playback/s/master.m3u8?t=t"),
+            "http://127.0.0.1:8096/api/v1/playback/s/master.m3u8?t=t"
+        );
     }
 }

@@ -2,7 +2,7 @@
 
 use flex_protocol::MediaItem;
 use gtk4::prelude::*;
-use gtk4::{Align, Box as GtkBox, Button, Image, Label, Orientation, Picture, Stack};
+use gtk4::{Align, Box as GtkBox, Button, Image, Label, Orientation, Picture, ProgressBar, Stack};
 
 /// Widgets backing one card. The artwork is filled in asynchronously by the
 /// caller once the image bytes have been fetched.
@@ -10,11 +10,26 @@ pub struct Card {
     pub button: Button,
     pub picture: Picture,
     pub stack: Stack,
+    pub progress: ProgressBar,
 }
 
 /// Build a card for `item`. The artwork stack starts on a symbolic placeholder
 /// and is switched to the real poster when [`Card::picture`] is populated.
 pub fn build_card(item: &MediaItem) -> Card {
+    let card = build_card_inner(item);
+    card.progress.set_visible(false);
+    card
+}
+
+/// Build a card that additionally shows a progress bar under the title.
+pub fn build_continue_card(item: &MediaItem, fraction: f64) -> Card {
+    let card = build_card_inner(item);
+    card.progress.set_visible(true);
+    card.progress.set_fraction(fraction.clamp(0.0, 1.0));
+    card
+}
+
+fn build_card_inner(item: &MediaItem) -> Card {
     let picture = Picture::new();
     picture.set_content_fit(gtk4::ContentFit::Cover);
     picture.set_can_shrink(true);
@@ -42,6 +57,10 @@ pub fn build_card(item: &MediaItem) -> Card {
     year.set_halign(Align::Start);
     year.set_xalign(0.0);
 
+    let progress = ProgressBar::new();
+    progress.set_size_request(150, -1);
+    progress.set_margin_top(2);
+
     let content = GtkBox::new(Orientation::Vertical, 4);
     content.set_margin_start(6);
     content.set_margin_end(6);
@@ -50,6 +69,7 @@ pub fn build_card(item: &MediaItem) -> Card {
     content.append(&stack);
     content.append(&title);
     content.append(&year);
+    content.append(&progress);
 
     let button = Button::new();
     button.set_child(Some(&content));
@@ -61,5 +81,6 @@ pub fn build_card(item: &MediaItem) -> Card {
         button,
         picture,
         stack,
+        progress,
     }
 }

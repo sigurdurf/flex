@@ -21,8 +21,37 @@
 use std::process::{Child, Command, Stdio};
 
 use anyhow::Result;
+use flex_protocol::ClientCapabilities;
 use gtk4::prelude::*;
 use libmpv2::Mpv;
+
+/// What the bundled libmpv (and its ffmpeg) can decode.
+///
+/// The server matches container/codec names case-insensitively against
+/// ffprobe values, so the lowercase lists below are the ones the server expects
+/// (see `ClientCapabilities` docs). `hls: true` tells the server it may serve
+/// remux/transcode output as HLS.
+pub fn client_capabilities() -> ClientCapabilities {
+    ClientCapabilities {
+        containers: ["mp4", "matroska", "webm", "mpegts"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
+        video_codecs: ["h264", "hevc", "vp9", "av1"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
+        audio_codecs: ["aac", "opus", "flac", "mp3", "vorbis", "ac3", "eac3", "dts"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
+        max_width: None,
+        max_height: None,
+        max_bitrate: None,
+        hls: true,
+        hdr: false,
+    }
+}
 
 /// Which engine is currently driving playback.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

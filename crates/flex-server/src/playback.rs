@@ -329,15 +329,42 @@ impl SessionManager {
 
 // --- Handlers ---------------------------------------------------------------
 
+/// Resolve the effective start position for a playback request.
+///
+/// An explicit `requested` value always wins. Otherwise the user's saved watch
+/// state is used, but only when it is resumable (not watched and past zero).
+pub async fn resolve_start_position(
+    pool: &sqlx::SqlitePool,
+    user_id: i64,
+    item_id: i64,
+    requested: Option<u64>,
+) -> Result<Option<u64>, sqlx::Error> {
+    match requested {
+        Some(ms) => Ok(Some(ms)),
+        None => Ok(db::get_watch_state(pool, user_id, item_id)
+            .await?
+            .filter(|state| !state.watched && state.position_ms > 0)
+            .map(|state| state.position_ms)),
+    }
+}
+
 /// `POST /api/v1/playback/start`
 pub async fn start(
-    _auth: AuthUser,
+    auth: AuthUser,
     State(state): State<AppState>,
     Json(request): Json<PlaybackStartRequest>,
 ) -> Result<Json<PlaybackSession>, AppError> {
     let item = db::get_item(&state.pool, request.item_id)
         .await?
         .ok_or_else(|| AppError::not_found(format!("media item {} not found", request.item_id)))?;
+
+    let start_ms = resolve_start_position(
+        &state.pool,
+        auth.user.id,
+        item.id,
+        request.start_position_ms,
+    )
+    .await?;
 
     let mode = decide_mode(&item, &request.capabilities);
     let session_id = uuid::Uuid::new_v4().to_string();
@@ -349,6 +376,10 @@ pub async fn start(
     let subtitle_stream_index = request.subtitle_track;
 
     if mode == PlaybackMode::Direct {
+        // Direct play serves the original file as-is. The wire protocol has no
+        // field to carry a resume offset, so a saved position is not applied
+        // here: the client is expected to seek after opening the file (it can
+        // read the position from `GET /progress/{item_id}`).
         let session = Session {
             id: session_id.clone(),
             token: token.clone(),
@@ -389,7 +420,6 @@ pub async fn start(
         ));
     }
 
-    let start_ms = request.start_position_ms;
     let caps = &request.capabilities;
     let args = match mode {
         PlaybackMode::Remux => {
@@ -901,5 +931,101 @@ mod tests {
         assert!(manager.authorize("fresh", "t-fresh").is_ok());
         assert!(manager.authorize("stale", "t-stale").is_err());
         assert!(manager.authorize("expired", "t-expired").is_err());
+    }
+
+    async fn seed_user(pool: &sqlx::SqlitePool) -> i64 {
+        db::create_user(
+            pool,
+            "alice",
+            "not-a-real-hash",
+            flex_protocol::UserRole::User,
+        )
+        .await
+        .unwrap()
+        .id
+    }
+
+    async fn seed_item(pool: &sqlx::SqlitePool) -> i64 {
+        let library = db::upsert_library(
+            pool,
+            "Movies",
+            "/media/movies",
+            flex_protocol::LibraryKind::Movies,
+        )
+        .await
+        .unwrap();
+        let item = crate::model::NewMediaItem {
+            library_id: library,
+            kind: flex_protocol::MediaKind::Movie,
+            title: "Test".into(),
+            sort_title: "test".into(),
+            year: None,
+            overview: None,
+            file_path: "/media/movies/test.mkv".into(),
+            file_size: 1,
+            container: Some("matroska".into()),
+            duration_ms: Some(100_000),
+            streams: Default::default(),
+            sidecars: Vec::new(),
+            poster_path: None,
+            backdrop_path: None,
+        };
+        db::upsert_media(pool, &item).await.unwrap().0
+    }
+
+    #[tokio::test]
+    async fn resumes_from_saved_position_when_request_omits_it() {
+        let pool = db::test_pool().await;
+        let user = seed_user(&pool).await;
+        let item_id = seed_item(&pool).await;
+        db::upsert_watch_state(&pool, user, item_id, 42_000, Some(100_000), false, 10)
+            .await
+            .unwrap();
+
+        let resolved = resolve_start_position(&pool, user, item_id, None)
+            .await
+            .unwrap();
+        assert_eq!(resolved, Some(42_000));
+    }
+
+    #[tokio::test]
+    async fn explicit_request_position_wins() {
+        let pool = db::test_pool().await;
+        let user = seed_user(&pool).await;
+        let item_id = seed_item(&pool).await;
+        db::upsert_watch_state(&pool, user, item_id, 42_000, Some(100_000), false, 10)
+            .await
+            .unwrap();
+
+        let resolved = resolve_start_position(&pool, user, item_id, Some(7_000))
+            .await
+            .unwrap();
+        assert_eq!(resolved, Some(7_000));
+    }
+
+    #[tokio::test]
+    async fn watched_item_does_not_resume() {
+        let pool = db::test_pool().await;
+        let user = seed_user(&pool).await;
+        let item_id = seed_item(&pool).await;
+        db::upsert_watch_state(&pool, user, item_id, 99_000, Some(100_000), true, 10)
+            .await
+            .unwrap();
+
+        let resolved = resolve_start_position(&pool, user, item_id, None)
+            .await
+            .unwrap();
+        assert_eq!(resolved, None);
+    }
+
+    #[tokio::test]
+    async fn no_progress_means_no_resume() {
+        let pool = db::test_pool().await;
+        let user = seed_user(&pool).await;
+        let item_id = seed_item(&pool).await;
+        let resolved = resolve_start_position(&pool, user, item_id, None)
+            .await
+            .unwrap();
+        assert_eq!(resolved, None);
     }
 }

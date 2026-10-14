@@ -15,6 +15,7 @@ pub enum AppError {
     Conflict(String),
     TooManyRequests(String),
     ServiceUnavailable(String),
+    BadGateway(String),
     Internal(String),
 }
 
@@ -47,6 +48,10 @@ impl AppError {
         Self::ServiceUnavailable(message.into())
     }
 
+    pub fn bad_gateway(message: impl Into<String>) -> Self {
+        Self::BadGateway(message.into())
+    }
+
     pub fn internal(message: impl Into<String>) -> Self {
         Self::Internal(message.into())
     }
@@ -62,6 +67,7 @@ impl AppError {
             Self::ServiceUnavailable(msg) => {
                 (StatusCode::SERVICE_UNAVAILABLE, "service_unavailable", msg)
             }
+            Self::BadGateway(msg) => (StatusCode::BAD_GATEWAY, "bad_gateway", msg),
             Self::Internal(msg) => (StatusCode::INTERNAL_SERVER_ERROR, "internal_error", msg),
         }
     }

@@ -8,8 +8,13 @@ use libadwaita as adw;
 use super::format_duration_ms;
 
 /// Build a scrollable detail page for `item`. `on_play` is invoked when the
-/// prominent Play button is pressed.
-pub fn build_detail_page(item: &MediaItem, on_play: impl Fn() + 'static) -> adw::NavigationPage {
+/// prominent Play button is pressed. When `resume_ms` is set the button offers
+/// to resume from that position (the server resumes automatically).
+pub fn build_detail_page(
+    item: &MediaItem,
+    resume_ms: Option<u64>,
+    on_play: impl Fn() + 'static,
+) -> adw::NavigationPage {
     let content = GtkBox::new(Orientation::Vertical, 14);
     content.set_margin_start(18);
     content.set_margin_end(18);
@@ -46,7 +51,11 @@ pub fn build_detail_page(item: &MediaItem, on_play: impl Fn() + 'static) -> adw:
         content.append(&video_label);
     }
 
-    let play_button = Button::with_label("Play");
+    let play_label = match resume_ms {
+        Some(ms) if ms > 0 => format!("Resume from {}", super::format_duration_ms(Some(ms))),
+        _ => "Play".to_string(),
+    };
+    let play_button = Button::with_label(&play_label);
     play_button.add_css_class("suggested-action");
     play_button.add_css_class("pill");
     play_button.set_halign(Align::Start);

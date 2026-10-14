@@ -49,12 +49,13 @@ graph LR
 | Crate            | Type      | Responsibilities                                                              |
 |------------------|-----------|-------------------------------------------------------------------------------|
 | `flex-protocol`  | library   | Serde types (`MediaItem`, `Library`, `User`, `PlaybackSession`, …) and API path constants. |
-| `flex-server`    | binary    | Config loading, auth (Argon2id + device tokens), directory scanning, `ffprobe` parsing, SQLite persistence, REST API, Range streaming, HLS remux/transcode, subtitle extraction. |
-| `flex-client`    | binary    | GTK4/libadwaita UI, REST consumption, mpv embedding / external fallback.       |
+| `flex-server`    | binary    | Config loading, auth (Argon2id + device tokens), directory scanning, `ffprobe` parsing, SQLite persistence, REST API, Range streaming, HLS remux/transcode, subtitle extraction, watch-state/resume, online subtitle search (OpenSubtitles), static web-UI serving. |
+| `flex-client`    | binary    | GTK4/libadwaita UI, authenticated REST consumption, playback sessions, progress/resume, mpv embedding / external fallback. |
 
-Outside the workspace, `android/` holds a first-pass Android client scaffold
-(unverified, not compiled) that consumes the same HTTP API — see
-[`ANDROID.md`](ANDROID.md).
+Outside the workspace, `web/` holds the self-contained browser SPA served by
+`flex-server` (vanilla HTML/CSS/JS + vendored `hls.js`), and `android/` holds a
+first-pass Android client scaffold (unverified, not compiled); both consume the
+same HTTP API — see [`ANDROID.md`](ANDROID.md).
 
 ## Data flow
 
@@ -308,9 +309,18 @@ Full details and payload examples are in [`API.md`](API.md).
 | GET    | `/api/v1/items/{id}/artwork?type=…`       | Poster/backdrop image bytes.               |
 | GET    | `/api/v1/items/{id}/subtitles`            | List subtitle tracks.                      |
 | GET    | `/api/v1/items/{id}/subtitles/{track}`    | Extracted WebVTT subtitle track.           |
+| GET    | `/api/v1/continue-watching`               | Resumable items for the current user.      |
+| GET    | `/api/v1/progress`                        | All saved watch state for the user.        |
+| GET    | `/api/v1/progress/{item_id}`              | Saved watch state for one item.            |
+| PUT    | `/api/v1/progress/{item_id}`              | Upsert playback position / watched flag.   |
+| DELETE | `/api/v1/progress/{item_id}`              | Clear progress for an item.                |
+| GET    | `/api/v1/subtitles/search`                | Search online subtitle providers.          |
+| POST   | `/api/v1/subtitles/download`              | Download + install a subtitle as a sidecar.|
+| GET    | `/` and any non-`/api` path              | Static web UI (SPA fallback). **No auth.** |
 
-All routes except `/health` and `/auth/login` require a bearer token; HLS
-playlist/segment routes are additionally authorised by the scoped `?t=` token.
+All routes except `/health`, `/auth/login` and static web assets require a
+bearer token; HLS playlist/segment routes are additionally authorised by the
+scoped `?t=` token.
 
 ## Key design decisions & tradeoffs
 

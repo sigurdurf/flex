@@ -211,14 +211,15 @@ workflow and pull-request expectations.
 
 ## Roadmap
 
-The following are **not yet implemented** — they are planned directions:
-
 - [x] Authentication and multi-user accounts
 - [x] Transcoding / adaptive bitrate streaming
-- [ ] Web UI
-- [ ] Online subtitle search
-- [ ] Watch state / resume / "continue watching"
+- [x] Watch state / resume / "continue watching"
+- [x] Web UI (static SPA served by `flex-server`; see [`web/`](web/))
+- [x] Online subtitle search (OpenSubtitles provider; see [`docs/API.md`](docs/API.md))
 - [ ] Verified, compiled Android client (the `android/` sources are a scaffold)
+
+The Android client is the main remaining item; it cannot be built or verified
+without a JDK/Android SDK, which is not present in the current environment.
 
 ## License
 

@@ -14,6 +14,8 @@ pub const DEFAULT_DATABASE: &str = "./data/flex.db";
 pub const DEFAULT_CACHE_DIR: &str = "./data/cache";
 /// Default maximum number of concurrent remux/transcode sessions.
 pub const DEFAULT_MAX_TRANSCODE_SESSIONS: usize = 2;
+/// Default directory holding the static web UI.
+pub const DEFAULT_WEB_DIR: &str = "./web";
 
 /// Extensions treated as media when no `extensions` key is present in the config.
 pub const DEFAULT_EXTENSIONS: &[&str] = &[
@@ -53,6 +55,19 @@ pub struct Config {
     pub transcode_enabled: bool,
     /// Upper bound on concurrent remux/transcode sessions.
     pub max_transcode_sessions: usize,
+    /// Directory containing the static web UI. When unset the server looks for a
+    /// `web/` directory relative to the working directory and the executable.
+    pub web_dir: Option<PathBuf>,
+    /// OpenSubtitles.com API key. When unset the OpenSubtitles provider is not
+    /// registered.
+    pub opensubtitles_api_key: Option<String>,
+    /// Optional OpenSubtitles account username.
+    pub opensubtitles_username: Option<String>,
+    /// Optional OpenSubtitles account password.
+    pub opensubtitles_password: Option<String>,
+    /// Register the deterministic in-memory `mock` subtitle provider. Testing
+    /// only — never enable this in production.
+    pub enable_mock_subtitles: bool,
 }
 
 impl Default for Config {
@@ -66,6 +81,11 @@ impl Default for Config {
             extensions: DEFAULT_EXTENSIONS.iter().map(|s| s.to_string()).collect(),
             transcode_enabled: true,
             max_transcode_sessions: DEFAULT_MAX_TRANSCODE_SESSIONS,
+            web_dir: None,
+            opensubtitles_api_key: None,
+            opensubtitles_username: None,
+            opensubtitles_password: None,
+            enable_mock_subtitles: false,
         }
     }
 }
@@ -78,6 +98,27 @@ impl Config {
             .filter(|s| !s.trim().is_empty())
             .unwrap_or(DEFAULT_CACHE_DIR)
             .into()
+    }
+
+    /// Resolve the static web UI directory.
+    ///
+    /// An explicit [`Config::web_dir`] always wins (even if it does not exist —
+    /// serving simply 404s). Otherwise a `web/` directory next to the current
+    /// working directory or next to the running executable is used. Returns
+    /// `None` when no candidate exists, in which case static serving is
+    /// disabled.
+    pub fn web_path(&self) -> Option<PathBuf> {
+        if let Some(dir) = self.web_dir.as_ref().filter(|p| !p.as_os_str().is_empty()) {
+            return Some(dir.clone());
+        }
+
+        let mut candidates = vec![PathBuf::from(DEFAULT_WEB_DIR)];
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(parent) = exe.parent() {
+                candidates.push(parent.join("web"));
+            }
+        }
+        candidates.into_iter().find(|p| p.is_dir())
     }
 }
 
@@ -190,6 +231,19 @@ pub fn load(cli: &Cli) -> anyhow::Result<(Config, bool)> {
     }
     if let Some(cache) = &cli.cache_dir {
         config.cache_dir = Some(cache.to_string_lossy().into_owned());
+    }
+    if config
+        .opensubtitles_api_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .is_none()
+    {
+        if let Ok(key) = std::env::var("FLEX_OPENSUBTITLES_API_KEY") {
+            if !key.trim().is_empty() {
+                config.opensubtitles_api_key = Some(key);
+            }
+        }
     }
     for spec in &cli.libraries {
         let (name, path) = spec.split_once('=').ok_or_else(|| {

@@ -9,6 +9,7 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::time::Duration;
 
+use flex_protocol::PlaybackMode;
 use gtk4::glib;
 use gtk4::prelude::*;
 use gtk4::{Align, Box as GtkBox, Button, Label, Orientation, Scale};
@@ -16,6 +17,15 @@ use libadwaita as adw;
 
 use super::format_duration_secs;
 use crate::player::{Player, PlayerBackend};
+
+/// Human-readable label for a playback mode.
+pub fn mode_label(mode: PlaybackMode) -> &'static str {
+    match mode {
+        PlaybackMode::Direct => "Direct play",
+        PlaybackMode::Remux => "Remux",
+        PlaybackMode::Transcode => "Transcode",
+    }
+}
 
 /// State and widgets for the player page.
 pub struct PlayerPage {
@@ -185,15 +195,19 @@ impl PlayerPage {
         }
     }
 
-    /// Show a short status line describing the active backend.
-    pub fn set_status(&self, backend: PlayerBackend) {
-        let text = match backend {
+    /// Show a short status line describing the active playback mode and backend.
+    pub fn set_status(&self, backend: PlayerBackend, mode: Option<PlaybackMode>) {
+        let backend_text = match backend {
             PlayerBackend::Libmpv => "Embedded playback via libmpv",
             PlayerBackend::External => {
                 "External mpv window (Wayland fallback) — use mpv's own window for controls"
             }
         };
-        self.status_label.set_text(text);
+        let text = match mode {
+            Some(mode) => format!("{} · {}", mode_label(mode), backend_text),
+            None => backend_text.to_string(),
+        };
+        self.status_label.set_text(&text);
         self.status_label.set_visible(true);
     }
 

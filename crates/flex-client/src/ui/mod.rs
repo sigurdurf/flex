@@ -3,10 +3,12 @@
 
 mod card;
 mod detail;
+mod login;
 pub mod player_page;
 
-pub use card::build_card;
+pub use card::{build_card, build_continue_card, Card};
 pub use detail::build_detail_page;
+pub use login::LoginPage;
 pub use player_page::PlayerPage;
 
 /// Format a duration given in milliseconds as `mm:ss`, or `h:mm:ss` when the

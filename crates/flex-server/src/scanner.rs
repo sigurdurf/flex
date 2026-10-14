@@ -222,6 +222,21 @@ fn build_item(library_id: i64, kind: MediaKind, path: &Path, probed: &Probed) ->
     }
 }
 
+/// Re-probe and upsert a single item.
+///
+/// Used after writing a new subtitle sidecar so the item's sidecar tracks are
+/// refreshed without a full library scan.
+pub async fn reindex_item(pool: &SqlitePool, id: i64) -> anyhow::Result<()> {
+    let item = db::get_item(pool, id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("media item {id} not found"))?;
+    let path = PathBuf::from(&item.file_path);
+    let probed = probe::probe_file(&path).await?;
+    let new_item = build_item(item.library_id, item.kind, &path, &probed);
+    db::upsert_media(pool, &new_item).await?;
+    Ok(())
+}
+
 /// Walk a library directory, returning matching media files.
 async fn collect_media_files(
     root: PathBuf,

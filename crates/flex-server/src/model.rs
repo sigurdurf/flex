@@ -2,6 +2,7 @@
 
 use flex_protocol::{
     AudioStream, Device, MediaItem, MediaKind, SubtitleStream, User, UserRole, VideoStream,
+    WatchState,
 };
 use serde::{Deserialize, Serialize};
 use sqlx::sqlite::SqliteRow;
@@ -196,6 +197,25 @@ pub fn row_to_media_item(row: &SqliteRow) -> Result<MediaItem, sqlx::Error> {
         updated_at: row.try_get("updated_at")?,
         poster_url: poster_path.map(|_| flex_protocol::artwork_path(id) + "?type=poster"),
         backdrop_url: backdrop_path.map(|_| flex_protocol::artwork_path(id) + "?type=backdrop"),
+    })
+}
+
+/// Decode a `watch_state` row into a [`WatchState`].
+///
+/// Column names are read verbatim. When the row is a join that also carries
+/// `media_items` columns (as in the continue-watching query) the caller passes a
+/// prefix matching the alias used for the watch-state columns.
+pub fn row_to_watch_state(row: &SqliteRow, prefix: &str) -> Result<WatchState, sqlx::Error> {
+    let col = |name: &str| format!("{prefix}{name}");
+    let position: i64 = row.try_get(col("position_ms").as_str())?;
+    let duration: Option<i64> = row.try_get(col("duration_ms").as_str())?;
+    let watched: i64 = row.try_get(col("watched").as_str())?;
+    Ok(WatchState {
+        item_id: row.try_get(col("item_id").as_str())?,
+        position_ms: position.max(0) as u64,
+        duration_ms: duration.map(|d| d.max(0) as u64),
+        watched: watched != 0,
+        updated_at: row.try_get(col("updated_at").as_str())?,
     })
 }
 

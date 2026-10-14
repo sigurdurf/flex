@@ -32,3 +32,20 @@ kind = "tv"
 
 # File extensions treated as media during a scan.
 extensions = ["mkv", "mp4", "m4v", "avi", "mov", "webm", "ts", "wmv", "flv", "mpg", "mpeg"]
+
+# Directory holding the static web UI (the SPA in `web/`). Defaults to `./web`,
+# resolved relative to the working directory and then the executable's directory
+# when this key is unset. When no `web/` directory exists, static serving is
+# simply disabled.
+web_dir = "./web"
+
+# Online subtitle search/download (OpenSubtitles.com). When no API key is set,
+# the OpenSubtitles provider is not registered. Can also be supplied through the
+# FLEX_OPENSUBTITLES_API_KEY environment variable.
+# opensubtitles_api_key = "your-opensubtitles-api-key"
+# opensubtitles_username = "your-username"
+# opensubtitles_password = "your-password"
+
+# Register the deterministic in-memory `mock` subtitle provider. TESTING ONLY —
+# never enable this in a production deployment.
+enable_mock_subtitles = false

@@ -1,30 +1,46 @@
 //! Window construction and UI wiring.
 //!
-//! The whole browser is built in code (no `.gresource`/blueprint files). The
-//! layout is an [`adw::NavigationSplitView`] whose sidebar lists the libraries
-//! and whose content hosts a [`adw::NavigationView`] onto which detail and
-//! player pages are pushed.
+//! The whole browser is built in code (no `.gresource`/blueprint files). A
+//! top-level [`gtk4::Stack`] swaps between the login page and the main
+//! [`adw::NavigationSplitView`] whose sidebar lists the libraries and whose
+//! content hosts a [`adw::NavigationView`] onto which detail and player pages
+//! are pushed.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+use std::time::{Duration, Instant};
 
-use flex_protocol::{ItemQuery, Library, MediaItem};
+use flex_protocol::{
+    ContinueWatchingEntry, ItemQuery, Library, MediaItem, PlaybackSession, PlaybackStartRequest,
+    UpdateProgressRequest,
+};
 use gtk4::prelude::*;
 use gtk4::{gdk, glib, Align, Box as GtkBox, Button, Orientation, SelectionMode};
 use libadwaita as adw;
 use libadwaita::prelude::*;
 
-use crate::api::ApiClient;
-use crate::player::Player;
-use crate::ui::{build_card, build_detail_page, PlayerPage};
+use crate::api::{ApiClient, ApiError, ApiErrorKind};
+use crate::player::{client_capabilities, Player};
+use crate::session;
+use crate::ui::{build_card, build_continue_card, build_detail_page, LoginPage, PlayerPage};
+
+/// The currently running playback session, if any.
+struct ActivePlayback {
+    session_id: String,
+    item_id: i64,
+}
 
 /// Shared application state. Widgets are reference-counted GObjects, so cloning
 /// the handles into signal closures is cheap.
 pub struct AppState {
     api: ApiClient,
     window: gtk4::Window,
+    root_stack: gtk4::Stack,
+    login_page: LoginPage,
     nav_view: adw::NavigationView,
     flow: gtk4::FlowBox,
+    continue_box: GtkBox,
+    continue_section: GtkBox,
     browse_stack: gtk4::Stack,
     status_page: adw::StatusPage,
     sidebar_list: gtk4::ListBox,
@@ -34,6 +50,8 @@ pub struct AppState {
     current_library: Cell<Option<i64>>,
     player: Rc<RefCell<Option<Player>>>,
     player_page: Rc<PlayerPage>,
+    active: RefCell<Option<ActivePlayback>>,
+    last_progress: RefCell<Option<Instant>>,
 }
 
 /// Build the application window and kick off the initial data loads.
@@ -49,6 +67,8 @@ pub fn build_ui(app: &adw::Application, api: ApiClient) -> adw::ApplicationWindo
 
     let player: Rc<RefCell<Option<Player>>> = Rc::new(RefCell::new(None));
     let player_page = Rc::new(PlayerPage::new(player.clone(), &window_widget));
+
+    let login_page = LoginPage::new(&api.base_url());
 
     // --- Sidebar ---------------------------------------------------------
     let search = gtk4::SearchEntry::new();
@@ -86,6 +106,28 @@ pub fn build_ui(app: &adw::Application, api: ApiClient) -> adw::ApplicationWindo
 
     let sidebar_page = adw::NavigationPage::new(&sidebar_toolbar, "Flex");
 
+    // --- Continue watching ----------------------------------------------
+    let continue_box = GtkBox::new(Orientation::Horizontal, 12);
+    continue_box.set_margin_start(12);
+    continue_box.set_margin_end(12);
+    continue_box.set_margin_top(6);
+    continue_box.set_margin_bottom(6);
+
+    let continue_scroll = gtk4::ScrolledWindow::new();
+    continue_scroll.set_policy(gtk4::PolicyType::Automatic, gtk4::PolicyType::Never);
+    continue_scroll.set_child(Some(&continue_box));
+
+    let continue_heading = gtk4::Label::new(Some("Continue watching"));
+    continue_heading.set_xalign(0.0);
+    continue_heading.add_css_class("heading");
+    continue_heading.set_margin_start(12);
+    continue_heading.set_margin_top(8);
+
+    let continue_section = GtkBox::new(Orientation::Vertical, 4);
+    continue_section.append(&continue_heading);
+    continue_section.append(&continue_scroll);
+    continue_section.set_visible(false);
+
     // --- Browse content --------------------------------------------------
     let flow = gtk4::FlowBox::new();
     flow.set_selection_mode(SelectionMode::None);
@@ -104,19 +146,28 @@ pub fn build_ui(app: &adw::Application, api: ApiClient) -> adw::ApplicationWindo
     flow_scroll.set_vexpand(true);
     flow_scroll.set_child(Some(&flow));
 
+    let browse_content = GtkBox::new(Orientation::Vertical, 0);
+    browse_content.append(&continue_section);
+    browse_content.append(&flow_scroll);
+
     let status_page = adw::StatusPage::new();
     status_page.set_vexpand(true);
     status_page.set_icon_name(Some("folder-videos-symbolic"));
     status_page.set_title("Loading…");
 
     let browse_stack = gtk4::Stack::new();
-    browse_stack.add_named(&flow_scroll, Some("grid"));
+    browse_stack.add_named(&browse_content, Some("grid"));
     browse_stack.add_named(&status_page, Some("status"));
     browse_stack.set_visible_child_name("status");
 
     let browse_header = adw::HeaderBar::new();
-    let browse_title = adw::WindowTitle::new("Browse", api.base_url());
+    let browse_title = adw::WindowTitle::new("Browse", &api.base_url());
     browse_header.set_title_widget(Some(&browse_title));
+
+    let logout_button = Button::from_icon_name("application-exit-symbolic");
+    logout_button.set_tooltip_text(Some("Log out"));
+    logout_button.add_css_class("flat");
+    browse_header.pack_end(&logout_button);
 
     let browse_toolbar = adw::ToolbarView::new();
     browse_toolbar.add_top_bar(&browse_header);
@@ -137,23 +188,22 @@ pub fn build_ui(app: &adw::Application, api: ApiClient) -> adw::ApplicationWindo
 
     let toast_overlay = adw::ToastOverlay::new();
     toast_overlay.set_child(Some(&split_view));
-    window.set_content(Some(&toast_overlay));
 
-    window.connect_close_request({
-        let player = player.clone();
-        move |_| {
-            if let Some(player) = player.borrow().as_ref() {
-                let _ = player.pause();
-            }
-            glib::Propagation::Proceed
-        }
-    });
+    let root_stack = gtk4::Stack::new();
+    root_stack.add_named(&login_page.widget, Some("login"));
+    root_stack.add_named(&toast_overlay, Some("main"));
+    root_stack.set_visible_child_name("login");
+    window.set_content(Some(&root_stack));
 
     let state = Rc::new(AppState {
         api,
         window: window_widget,
+        root_stack,
+        login_page,
         nav_view,
         flow,
+        continue_box,
+        continue_section,
         browse_stack,
         status_page,
         sidebar_list: sidebar_list.clone(),
@@ -163,17 +213,85 @@ pub fn build_ui(app: &adw::Application, api: ApiClient) -> adw::ApplicationWindo
         current_library: Cell::new(None),
         player: player.clone(),
         player_page: player_page.clone(),
+        active: RefCell::new(None),
+        last_progress: RefCell::new(None),
     });
 
-    connect_signals(&state, &scan_button);
+    connect_signals(&state, &scan_button, &logout_button);
     attach_keyboard_shortcuts(&state);
 
+    // Stop and save progress when the player page is dismissed.
+    state.player_page.page.connect_unmap({
+        let state = state.clone();
+        move |_| stop_playback(&state, true)
+    });
+
+    window.connect_close_request({
+        let state = state.clone();
+        move |_| {
+            stop_playback(&state, true);
+            glib::Propagation::Proceed
+        }
+    });
+
     state.player_page.start_polling();
-    check_health(&state);
-    load_libraries(&state);
-    refresh_items(&state);
+    start_progress_timer(&state);
+
+    if state.api.token().is_some() {
+        validate_session(&state);
+    } else {
+        show_login(&state, None);
+    }
 
     window
+}
+
+/// Validate a stored token via `GET /auth/me`, then enter the main UI.
+fn validate_session(state: &Rc<AppState>) {
+    state.login_page.set_busy(true);
+    state.login_page.set_status("Restoring session…");
+    let api = state.api.clone();
+    state.api.dispatch(async move { api.me().await }, {
+        let state = state.clone();
+        move |result| {
+            state.login_page.set_busy(false);
+            match result {
+                Ok(_) => enter_main(&state),
+                Err(err) if is_unauthorized(&err) => bounce_to_login(&state),
+                Err(err) => show_login(&state, Some(&format!("Could not reach server: {err:#}"))),
+            }
+        }
+    });
+}
+
+/// Switch to the main browser view and refresh all data.
+fn enter_main(state: &Rc<AppState>) {
+    state.login_page.set_status("");
+    state.root_stack.set_visible_child_name("main");
+    check_health(state);
+    load_libraries(state);
+    refresh_items(state);
+    load_continue_watching(state);
+}
+
+fn show_login(state: &Rc<AppState>, status: Option<&str>) {
+    state.login_page.set_busy(false);
+    state.login_page.set_status(status.unwrap_or(""));
+    state.root_stack.set_visible_child_name("login");
+}
+
+/// Clear local credentials and return to the login page after a `401`.
+fn bounce_to_login(state: &Rc<AppState>) {
+    state.api.clear_token();
+    let _ = session::clear();
+    stop_playback(state, false);
+    show_login(state, Some("Session expired — please sign in again."));
+}
+
+/// Whether an error originated from a `401 Unauthorized` response.
+fn is_unauthorized(err: &anyhow::Error) -> bool {
+    err.downcast_ref::<ApiError>()
+        .is_some_and(|e| e.kind == ApiErrorKind::Unauthorized)
 }
 
 fn check_health(state: &Rc<AppState>) {
@@ -193,7 +311,7 @@ fn check_health(state: &Rc<AppState>) {
     });
 }
 
-fn connect_signals(state: &Rc<AppState>, scan_button: &Button) {
+fn connect_signals(state: &Rc<AppState>, scan_button: &Button, logout_button: &Button) {
     scan_button.connect_clicked({
         let state = state.clone();
         move |_| {
@@ -212,10 +330,21 @@ fn connect_signals(state: &Rc<AppState>, scan_button: &Button) {
                         load_libraries(&state);
                         refresh_items(&state);
                     }
+                    Err(err) if is_unauthorized(&err) => bounce_to_login(&state),
                     Err(err) => toast(&state, &format!("Scan failed: {err:#}")),
                 }
             });
         }
+    });
+
+    logout_button.connect_clicked({
+        let state = state.clone();
+        move |_| logout(&state)
+    });
+
+    state.login_page.login_button.connect_clicked({
+        let state = state.clone();
+        move |_| submit_login(&state)
     });
 
     state.sidebar_list.connect_row_activated({
@@ -231,6 +360,67 @@ fn connect_signals(state: &Rc<AppState>, scan_button: &Button) {
     state.search.connect_search_changed({
         let state = state.clone();
         move |_| refresh_items(&state)
+    });
+}
+
+fn submit_login(state: &Rc<AppState>) {
+    let server = state.login_page.server_entry.text().to_string();
+    let username = state.login_page.username_entry.text().to_string();
+    let password = state.login_page.password_entry.text().to_string();
+    let device = state.login_page.device_entry.text().to_string();
+
+    if server.trim().is_empty() || username.trim().is_empty() {
+        state
+            .login_page
+            .set_status("Server URL and username are required.");
+        return;
+    }
+
+    state.login_page.set_busy(true);
+    state.login_page.set_status("");
+    let api = state.api.clone();
+    let device = (!device.trim().is_empty()).then_some(device);
+    state.api.dispatch(
+        async move {
+            api.set_base(server);
+            api.login(&username, &password, device.as_deref()).await
+        },
+        {
+            let state = state.clone();
+            move |result| {
+                state.login_page.set_busy(false);
+                match result {
+                    Ok(response) => {
+                        let stored = session::Session {
+                            server_url: state.api.base_url(),
+                            token: response.token.clone(),
+                            username: response.user.username.clone(),
+                        };
+                        if let Err(err) = session::save(&stored) {
+                            toast(&state, &format!("Could not save session: {err:#}"));
+                        }
+                        state.api.set_token(Some(response.token));
+                        enter_main(&state);
+                    }
+                    Err(err) => state
+                        .login_page
+                        .set_status(&format!("Sign-in failed: {err:#}")),
+                }
+            }
+        },
+    );
+}
+
+fn logout(state: &Rc<AppState>) {
+    stop_playback(state, false);
+    let api = state.api.clone();
+    state.api.dispatch(async move { api.logout().await }, {
+        let state = state.clone();
+        move |_| {
+            state.api.clear_token();
+            let _ = session::clear();
+            show_login(&state, None);
+        }
     });
 }
 
@@ -272,6 +462,7 @@ fn load_libraries(state: &Rc<AppState>) {
         let state = state.clone();
         move |result| match result {
             Ok(libraries) => populate_libraries(&state, &libraries),
+            Err(err) if is_unauthorized(&err) => bounce_to_login(&state),
             Err(err) => {
                 show_status(
                     &state,
@@ -351,6 +542,7 @@ fn refresh_items(state: &Rc<AppState>) {
         let state = state.clone();
         move |result| match result {
             Ok(page) => populate_flow(&state, page.items),
+            Err(err) if is_unauthorized(&err) => bounce_to_login(&state),
             Err(err) => {
                 show_status(
                     &state,
@@ -381,47 +573,125 @@ fn populate_flow(state: &Rc<AppState>, items: Vec<MediaItem>) {
         let card = build_card(&item);
         state.flow.append(&card.button);
 
-        let button = card.button.clone();
         let id = item.id;
         let state_click = state.clone();
-        button.connect_clicked(move |_| open_detail(&state_click, id));
-
-        let api = state.api.clone();
-        let card = Rc::new(card);
-        state.api.dispatch(
-            async move { api.artwork_bytes(id, "poster").await },
-            move |result| {
-                if let Ok(Some(bytes)) = result {
-                    let bytes = glib::Bytes::from(&bytes);
-                    if let Ok(texture) = gdk::Texture::from_bytes(&bytes) {
-                        card.picture.set_paintable(Some(&texture));
-                        card.stack.set_visible_child_name("art");
-                    }
-                }
-            },
-        );
+        card.button
+            .connect_clicked(move |_| open_detail(&state_click, id));
+        fill_artwork(state, id, card);
     }
 
     state.browse_stack.set_visible_child_name("grid");
 }
 
-fn open_detail(state: &Rc<AppState>, id: i64) {
+fn load_continue_watching(state: &Rc<AppState>) {
     let api = state.api.clone();
-    state.api.dispatch(async move { api.item(id).await }, {
-        let state = state.clone();
-        move |result| match result {
-            Ok(item) => {
-                let url = state.api.stream_url(item.id);
-                let state_play = state.clone();
-                let page = build_detail_page(&item, move || play_url(&state_play, &url));
-                state.nav_view.push(&page);
+    state
+        .api
+        .dispatch(async move { api.continue_watching().await }, {
+            let state = state.clone();
+            move |result| match result {
+                Ok(entries) => populate_continue(&state, entries),
+                Err(err) if is_unauthorized(&err) => bounce_to_login(&state),
+                Err(_) => state.continue_section.set_visible(false),
             }
-            Err(err) => toast(&state, &format!("Failed to load item: {err:#}")),
-        }
-    });
+        });
 }
 
-fn play_url(state: &Rc<AppState>, url: &str) {
+fn populate_continue(state: &Rc<AppState>, entries: Vec<ContinueWatchingEntry>) {
+    while let Some(child) = state.continue_box.first_child() {
+        child.unparent();
+    }
+    if entries.is_empty() {
+        state.continue_section.set_visible(false);
+        return;
+    }
+
+    for entry in entries {
+        let fraction = match entry.state.duration_ms {
+            Some(duration) if duration > 0 => entry.state.position_ms as f64 / duration as f64,
+            _ => 0.0,
+        };
+        let card = build_continue_card(&entry.item, fraction);
+        state.continue_box.append(&card.button);
+
+        let id = entry.item.id;
+        let state_click = state.clone();
+        card.button
+            .connect_clicked(move |_| play_item(&state_click, id));
+        fill_artwork(state, id, card);
+    }
+
+    state.continue_section.set_visible(true);
+}
+
+fn fill_artwork(state: &Rc<AppState>, id: i64, card: crate::ui::Card) {
+    let api = state.api.clone();
+    let card = Rc::new(card);
+    state.api.dispatch(
+        async move { api.artwork_bytes(id, "poster").await },
+        move |result| {
+            if let Ok(Some(bytes)) = result {
+                let bytes = glib::Bytes::from(&bytes);
+                if let Ok(texture) = gdk::Texture::from_bytes(&bytes) {
+                    card.picture.set_paintable(Some(&texture));
+                    card.stack.set_visible_child_name("art");
+                }
+            }
+        },
+    );
+}
+
+fn open_detail(state: &Rc<AppState>, id: i64) {
+    let api = state.api.clone();
+    state.api.dispatch(
+        async move {
+            let item = api.item(id).await?;
+            let progress = api.progress_for_item(id).await.unwrap_or(None);
+            Ok::<_, anyhow::Error>((item, progress))
+        },
+        {
+            let state = state.clone();
+            move |result| match result {
+                Ok((item, progress)) => {
+                    let resume_ms = progress
+                        .filter(|state| !state.watched && state.position_ms > 0)
+                        .map(|state| state.position_ms);
+                    let state_play = state.clone();
+                    let id = item.id;
+                    let page =
+                        build_detail_page(&item, resume_ms, move || play_item(&state_play, id));
+                    state.nav_view.push(&page);
+                }
+                Err(err) if is_unauthorized(&err) => bounce_to_login(&state),
+                Err(err) => toast(&state, &format!("Failed to load item: {err:#}")),
+            }
+        },
+    );
+}
+
+fn play_item(state: &Rc<AppState>, item_id: i64) {
+    let request = PlaybackStartRequest {
+        item_id,
+        capabilities: client_capabilities(),
+        audio_track: None,
+        subtitle_track: None,
+        // Omit the position; the server resumes from saved progress.
+        start_position_ms: None,
+    };
+    let api = state.api.clone();
+    state
+        .api
+        .dispatch(async move { api.playback_start(&request).await }, {
+            let state = state.clone();
+            move |result| match result {
+                Ok(session) => start_playback(&state, item_id, session),
+                Err(err) if is_unauthorized(&err) => bounce_to_login(&state),
+                Err(err) => toast(&state, &format!("Failed to start playback: {err:#}")),
+            }
+        });
+}
+
+fn start_playback(state: &Rc<AppState>, item_id: i64, session: PlaybackSession) {
     if state.player.borrow().is_none() {
         match Player::new(&state.window) {
             Ok(player) => *state.player.borrow_mut() = Some(player),
@@ -432,14 +702,26 @@ fn play_url(state: &Rc<AppState>, url: &str) {
         }
     }
 
+    let url = state.api.absolute_url(&session.url);
     let load_result = match state.player.borrow_mut().as_mut() {
-        Some(player) => player.load(url).and_then(|()| player.play()),
+        Some(player) => player.load(&url).and_then(|()| player.play()),
         None => Err(anyhow::anyhow!("player was not created")),
     };
     if let Err(err) = load_result {
         toast(state, &format!("Failed to start playback: {err:#}"));
+        let api = state.api.clone();
+        let session_id = session.session_id;
+        state
+            .api
+            .dispatch(async move { api.playback_stop(&session_id).await }, |_| {});
         return;
     }
+
+    *state.active.borrow_mut() = Some(ActivePlayback {
+        session_id: session.session_id,
+        item_id,
+    });
+    *state.last_progress.borrow_mut() = Some(Instant::now());
 
     let backend = state
         .player
@@ -447,9 +729,85 @@ fn play_url(state: &Rc<AppState>, url: &str) {
         .as_ref()
         .map(|player| player.backend());
     if let Some(backend) = backend {
-        state.player_page.set_status(backend);
+        state.player_page.set_status(backend, Some(session.mode));
     }
     state.nav_view.push(&state.player_page.page);
+}
+
+/// Stop the active session, optionally persisting progress first.
+fn stop_playback(state: &Rc<AppState>, save: bool) {
+    let active = state.active.borrow_mut().take();
+    let Some(active) = active else {
+        return;
+    };
+
+    if save {
+        save_progress(state, active.item_id);
+    } else {
+        *state.last_progress.borrow_mut() = None;
+    }
+
+    if let Some(player) = state.player.borrow().as_ref() {
+        let _ = player.pause();
+    }
+
+    let api = state.api.clone();
+    let session_id = active.session_id;
+    state
+        .api
+        .dispatch(async move { api.playback_stop(&session_id).await }, |_| {});
+}
+
+/// Persist the current position for `item_id` and reset the write throttle.
+fn save_progress(state: &Rc<AppState>, item_id: i64) {
+    let (position, duration) = match state.player.borrow().as_ref() {
+        Some(player) => (player.position(), player.duration()),
+        None => return,
+    };
+    if position <= 0.0 {
+        return;
+    }
+
+    let request = UpdateProgressRequest {
+        position_ms: (position * 1000.0) as u64,
+        duration_ms: (duration > 0.0).then_some((duration * 1000.0) as u64),
+        watched: None,
+    };
+    *state.last_progress.borrow_mut() = Some(Instant::now());
+
+    let api = state.api.clone();
+    state.api.dispatch(
+        async move { api.update_progress(item_id, &request).await },
+        {
+            let state = state.clone();
+            move |result| {
+                if let Err(err) = result {
+                    if is_unauthorized(&err) {
+                        bounce_to_login(&state);
+                    }
+                }
+            }
+        },
+    );
+}
+
+/// Write progress every ~10 s while a session is active (and at most every 5 s).
+fn start_progress_timer(state: &Rc<AppState>) {
+    let state = state.clone();
+    glib::timeout_add_local(Duration::from_secs(1), move || {
+        let item_id = state.active.borrow().as_ref().map(|active| active.item_id);
+        if let Some(item_id) = item_id {
+            let due = state
+                .last_progress
+                .borrow()
+                .map(|last| last.elapsed() >= Duration::from_secs(10))
+                .unwrap_or(true);
+            if due {
+                save_progress(&state, item_id);
+            }
+        }
+        glib::ControlFlow::Continue
+    });
 }
 
 fn show_status(state: &Rc<AppState>, icon: &str, title: &str, description: &str) {

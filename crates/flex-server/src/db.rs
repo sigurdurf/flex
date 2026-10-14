@@ -4,18 +4,22 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use flex_protocol::{Device, ItemQuery, Library, MediaItem, Page, User, UserRole};
+use flex_protocol::{
+    ContinueWatchingEntry, Device, ItemQuery, Library, MediaItem, Page, User, UserRole, WatchState,
+};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions};
 use sqlx::{QueryBuilder, Row, Sqlite};
 
 use crate::model::{
-    library_kind_str, row_to_device, row_to_media_item, row_to_user, NewMediaItem, SidecarTrack,
+    library_kind_str, row_to_device, row_to_media_item, row_to_user, row_to_watch_state,
+    NewMediaItem, SidecarTrack,
 };
 
 /// Ordered list of schema migrations applied on startup (idempotent).
 const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0001_init.sql"),
     include_str!("../migrations/0002_auth.sql"),
+    include_str!("../migrations/0003_progress.sql"),
 ];
 
 /// Current Unix time in seconds.
@@ -510,4 +514,295 @@ pub async fn list_items(
         limit,
         offset,
     })
+}
+
+// --- Watch state (progress / continue watching) -----------------------------
+
+/// Infer `watched` from a position and duration.
+///
+/// Counts as watched at or beyond 90% of a known, non-zero duration. When the
+/// duration is unknown (or zero) `watched` is never inferred as `true`.
+pub fn infer_watched(position_ms: u64, duration_ms: Option<u64>) -> bool {
+    match duration_ms {
+        Some(duration) if duration > 0 => {
+            position_ms.saturating_mul(100) >= duration.saturating_mul(90)
+        }
+        _ => false,
+    }
+}
+
+/// Clamp a position to a known duration, leaving it untouched otherwise.
+pub fn clamp_position_ms(position_ms: u64, duration_ms: Option<u64>) -> u64 {
+    match duration_ms {
+        Some(duration) if duration > 0 => position_ms.min(duration),
+        _ => position_ms,
+    }
+}
+
+/// Fetch one user's watch state for an item.
+pub async fn get_watch_state(
+    pool: &SqlitePool,
+    user_id: i64,
+    item_id: i64,
+) -> Result<Option<WatchState>, sqlx::Error> {
+    let row = sqlx::query(
+        "SELECT item_id, position_ms, duration_ms, watched, updated_at \
+         FROM watch_state WHERE user_id = ? AND item_id = ?",
+    )
+    .bind(user_id)
+    .bind(item_id)
+    .fetch_optional(pool)
+    .await?;
+    row.as_ref()
+        .map(|row| row_to_watch_state(row, ""))
+        .transpose()
+}
+
+/// Every watch-state row for a user, most recently updated first.
+pub async fn list_watch_states(
+    pool: &SqlitePool,
+    user_id: i64,
+) -> Result<Vec<WatchState>, sqlx::Error> {
+    let rows = sqlx::query(
+        "SELECT item_id, position_ms, duration_ms, watched, updated_at \
+         FROM watch_state WHERE user_id = ? ORDER BY updated_at DESC, item_id DESC",
+    )
+    .bind(user_id)
+    .fetch_all(pool)
+    .await?;
+    rows.iter().map(|row| row_to_watch_state(row, "")).collect()
+}
+
+/// Insert or update a user's progress for an item, returning the stored row.
+///
+/// `(user_id, item_id)` is unique, so a second call updates rather than
+/// duplicating.
+pub async fn upsert_watch_state(
+    pool: &SqlitePool,
+    user_id: i64,
+    item_id: i64,
+    position_ms: u64,
+    duration_ms: Option<u64>,
+    watched: bool,
+    updated_at: i64,
+) -> Result<WatchState, sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO watch_state \
+             (user_id, item_id, position_ms, duration_ms, watched, updated_at) \
+         VALUES (?, ?, ?, ?, ?, ?) \
+         ON CONFLICT (user_id, item_id) DO UPDATE SET \
+             position_ms = excluded.position_ms, \
+             duration_ms = excluded.duration_ms, \
+             watched = excluded.watched, \
+             updated_at = excluded.updated_at",
+    )
+    .bind(user_id)
+    .bind(item_id)
+    .bind(position_ms as i64)
+    .bind(duration_ms.map(|d| d as i64))
+    .bind(watched)
+    .bind(updated_at)
+    .execute(pool)
+    .await?;
+
+    Ok(WatchState {
+        item_id,
+        position_ms,
+        duration_ms,
+        watched,
+        updated_at,
+    })
+}
+
+/// Delete a user's watch state for an item. Returns whether a row was removed.
+pub async fn delete_watch_state(
+    pool: &SqlitePool,
+    user_id: i64,
+    item_id: i64,
+) -> Result<bool, sqlx::Error> {
+    let result = sqlx::query("DELETE FROM watch_state WHERE user_id = ? AND item_id = ?")
+        .bind(user_id)
+        .bind(item_id)
+        .execute(pool)
+        .await?;
+    Ok(result.rows_affected() > 0)
+}
+
+/// Resumable items for a user: progress > 0 and not yet watched, newest first.
+pub async fn list_continue_watching(
+    pool: &SqlitePool,
+    user_id: i64,
+    limit: i64,
+    offset: i64,
+) -> Result<Page<ContinueWatchingEntry>, sqlx::Error> {
+    let limit = limit.clamp(1, 100);
+    let offset = offset.max(0);
+
+    let total: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM watch_state \
+         WHERE user_id = ? AND watched = 0 AND position_ms > 0",
+    )
+    .bind(user_id)
+    .fetch_one(pool)
+    .await?;
+
+    let rows = sqlx::query(
+        "SELECT m.*, \
+                w.item_id AS state_item_id, \
+                w.position_ms AS state_position_ms, \
+                w.duration_ms AS state_duration_ms, \
+                w.watched AS state_watched, \
+                w.updated_at AS state_updated_at \
+         FROM watch_state w JOIN media_items m ON m.id = w.item_id \
+         WHERE w.user_id = ? AND w.watched = 0 AND w.position_ms > 0 \
+         ORDER BY w.updated_at DESC, w.item_id DESC \
+         LIMIT ? OFFSET ?",
+    )
+    .bind(user_id)
+    .bind(limit)
+    .bind(offset)
+    .fetch_all(pool)
+    .await?;
+
+    let items = rows
+        .iter()
+        .map(|row| {
+            Ok(ContinueWatchingEntry {
+                item: row_to_media_item(row)?,
+                state: row_to_watch_state(row, "state_")?,
+            })
+        })
+        .collect::<Result<Vec<_>, sqlx::Error>>()?;
+
+    Ok(Page {
+        items,
+        total,
+        limit,
+        offset,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use flex_protocol::LibraryKind;
+
+    async fn seed_user(pool: &SqlitePool) -> i64 {
+        create_user(pool, "alice", "not-a-real-hash", UserRole::User)
+            .await
+            .unwrap()
+            .id
+    }
+
+    async fn seed_item_named(pool: &SqlitePool, file_name: &str, title: &str) -> i64 {
+        let library = upsert_library(pool, "Movies", "/media/movies", LibraryKind::Movies)
+            .await
+            .unwrap();
+        let item = NewMediaItem {
+            library_id: library,
+            kind: flex_protocol::MediaKind::Movie,
+            title: title.into(),
+            sort_title: title.to_lowercase(),
+            year: None,
+            overview: None,
+            file_path: format!("/media/movies/{file_name}"),
+            file_size: 1,
+            container: Some("matroska".into()),
+            duration_ms: Some(100_000),
+            streams: Default::default(),
+            sidecars: Vec::new(),
+            poster_path: None,
+            backdrop_path: None,
+        };
+        upsert_media(pool, &item).await.unwrap().0
+    }
+
+    async fn seed_item(pool: &SqlitePool) -> i64 {
+        seed_item_named(pool, "test.mkv", "Test").await
+    }
+
+    #[test]
+    fn infers_watched_at_ninety_percent() {
+        assert!(!infer_watched(89_000, Some(100_000)));
+        assert!(infer_watched(90_000, Some(100_000)));
+        assert!(infer_watched(100_000, Some(100_000)));
+        // Unknown or zero duration never infers completion.
+        assert!(!infer_watched(50_000, None));
+        assert!(!infer_watched(50_000, Some(0)));
+        assert!(!infer_watched(0, Some(100_000)));
+    }
+
+    #[test]
+    fn clamps_position_to_known_duration() {
+        assert_eq!(clamp_position_ms(120_000, Some(100_000)), 100_000);
+        assert_eq!(clamp_position_ms(50_000, Some(100_000)), 50_000);
+        assert_eq!(clamp_position_ms(50_000, None), 50_000);
+        assert_eq!(clamp_position_ms(50_000, Some(0)), 50_000);
+    }
+
+    #[tokio::test]
+    async fn upsert_is_idempotent_and_updates() {
+        let pool = test_pool().await;
+        let user = seed_user(&pool).await;
+        let item_id = seed_item(&pool).await;
+
+        let first = upsert_watch_state(&pool, user, item_id, 1_000, Some(100_000), false, 10)
+            .await
+            .unwrap();
+        assert_eq!(first.position_ms, 1_000);
+
+        let second = upsert_watch_state(&pool, user, item_id, 2_000, Some(100_000), false, 20)
+            .await
+            .unwrap();
+        assert_eq!(second.position_ms, 2_000);
+        assert_eq!(second.updated_at, 20);
+
+        let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM watch_state")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(rows, 1);
+    }
+
+    #[tokio::test]
+    async fn continue_watching_excludes_finished_and_zero_position() {
+        let pool = test_pool().await;
+        let user = seed_user(&pool).await;
+        let resumable = seed_item(&pool).await;
+
+        let finished_item = seed_item_named(&pool, "finished.mkv", "Finished").await;
+        let untouched = seed_item_named(&pool, "untouched.mkv", "Untouched").await;
+
+        upsert_watch_state(&pool, user, resumable, 1_000, Some(100_000), false, 10)
+            .await
+            .unwrap();
+        upsert_watch_state(&pool, user, finished_item, 99_000, Some(100_000), true, 20)
+            .await
+            .unwrap();
+        upsert_watch_state(&pool, user, untouched, 0, Some(100_000), false, 30)
+            .await
+            .unwrap();
+
+        let page = list_continue_watching(&pool, user, 20, 0).await.unwrap();
+        assert_eq!(page.total, 1);
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].item.id, resumable);
+        assert_eq!(page.items[0].state.position_ms, 1_000);
+    }
+
+    #[tokio::test]
+    async fn delete_removes_row() {
+        let pool = test_pool().await;
+        let user = seed_user(&pool).await;
+        let item_id = seed_item(&pool).await;
+        upsert_watch_state(&pool, user, item_id, 1_000, Some(100_000), false, 10)
+            .await
+            .unwrap();
+        assert!(delete_watch_state(&pool, user, item_id).await.unwrap());
+        assert!(!delete_watch_state(&pool, user, item_id).await.unwrap());
+        assert!(get_watch_state(&pool, user, item_id)
+            .await
+            .unwrap()
+            .is_none());
+    }
 }
