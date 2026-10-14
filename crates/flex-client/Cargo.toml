@@ -1,0 +1,29 @@
+[package]
+name = "flex-client"
+description = "GTK4/libadwaita desktop video player client for Flex"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "flex-client"
+path = "src/main.rs"
+
+[dependencies]
+flex-protocol = { path = "../flex-protocol" }
+
+gtk4 = { version = "0.11", features = ["v4_10"] }
+libadwaita = { version = "0.9", features = ["v1_4"] }
+gdk4-x11 = "0.11"
+
+libmpv2 = "6.0"
+
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "http2"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+futures = "0.3"
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"

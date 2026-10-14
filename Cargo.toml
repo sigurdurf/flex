@@ -1,0 +1,22 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/flex-protocol",
+    "crates/flex-server",
+    "crates/flex-client",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["Flex Contributors"]
+repository = "https://github.com/flex-media/flex"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+
+[profile.dev]
+opt-level = 1

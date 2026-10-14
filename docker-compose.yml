@@ -1,0 +1,17 @@
+services:
+  flex-server:
+    build: .
+    image: flex-server:latest
+    container_name: flex-server
+    ports:
+      - "8096:8096"
+    volumes:
+      # Media library, mounted read-only.
+      - ./media:/media:ro
+      # Persistent SQLite database + cache.
+      - ./data:/data
+      # Optional: mount your own config instead of the image default.
+      # - ./flex.toml:/etc/flex/flex.toml:ro
+    environment:
+      - RUST_LOG=info
+    restart: unless-stopped

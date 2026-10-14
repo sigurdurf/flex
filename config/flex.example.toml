@@ -1,0 +1,26 @@
+# Example Flex server configuration.
+# Copy to `flex.toml` (or point the server at it with `--config <path>`).
+
+# Address to bind. Use 0.0.0.0 to expose on the LAN.
+host = "0.0.0.0"
+port = 8096
+
+# SQLite database file. Parent directory must exist and be writable.
+database = "./data/flex.db"
+
+# Optional: cache directory for extracted artwork/subtitles.
+# cache_dir = "./data/cache"
+
+# Directories to index. Add one `[[libraries]]` table per library.
+[[libraries]]
+name = "Movies"
+path = "/srv/media/movies"
+kind = "movies"
+
+[[libraries]]
+name = "TV Shows"
+path = "/srv/media/tv"
+kind = "tv"
+
+# File extensions treated as media during a scan.
+extensions = ["mkv", "mp4", "m4v", "avi", "mov", "webm", "ts", "wmv", "flv", "mpg", "mpeg"]

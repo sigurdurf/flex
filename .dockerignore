@@ -1,0 +1,27 @@
+# Build artifacts
+target/
+
+# Version control
+.git
+.gitignore
+
+# Local runtime data (databases, caches, media)
+data/
+media/
+*.db
+*.db-shm
+*.db-wal
+.env
+
+# CI, docs and tooling (not needed to build the server image)
+.github/
+docs/
+deploy/
+scripts/
+docker-compose.yml
+
+# Editor / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store

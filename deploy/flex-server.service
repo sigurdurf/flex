@@ -1,0 +1,25 @@
+[Unit]
+Description=Flex media server
+Documentation=https://github.com/flex-media/flex
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=flex
+Group=flex
+WorkingDirectory=/var/lib/flex
+Environment=RUST_LOG=info
+ExecStart=/usr/local/bin/flex-server --config /etc/flex/flex.toml
+Restart=on-failure
+RestartSec=5
+
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=true
+ReadWritePaths=/var/lib/flex
+
+[Install]
+WantedBy=multi-user.target
