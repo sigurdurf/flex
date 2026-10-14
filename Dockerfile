@@ -47,5 +47,15 @@ RUN mkdir -p /etc/flex /data
 EXPOSE 8096
 VOLUME ["/data"]
 
+# First-run admin bootstrap (unset after the account exists):
+#   -e FLEX_ADMIN_USER=admin -e FLEX_ADMIN_PASSWORD=...
+# Alternatively create accounts with the CLI, e.g.:
+#   docker run --rm flex-server user add admin --admin --password '...'
+#
+# Hardware transcoding (NVENC) is OFF by default: the image runs CPU-only with
+# the libx264 software fallback. To enable it, pass an NVIDIA GPU through
+# (requires nvidia-container-toolkit), e.g. `docker run --gpus all ...`.
+# NVENC is only used when the GPU is visible to the process.
+
 ENTRYPOINT ["/usr/local/bin/flex-server"]
 CMD ["--config", "/etc/flex/flex.toml"]

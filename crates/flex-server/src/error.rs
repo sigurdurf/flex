@@ -9,7 +9,12 @@ use flex_protocol::ApiError;
 #[derive(Debug)]
 pub enum AppError {
     BadRequest(String),
+    Unauthorized(String),
+    Forbidden(String),
     NotFound(String),
+    Conflict(String),
+    TooManyRequests(String),
+    ServiceUnavailable(String),
     Internal(String),
 }
 
@@ -18,8 +23,28 @@ impl AppError {
         Self::BadRequest(message.into())
     }
 
+    pub fn unauthorized(message: impl Into<String>) -> Self {
+        Self::Unauthorized(message.into())
+    }
+
+    pub fn forbidden(message: impl Into<String>) -> Self {
+        Self::Forbidden(message.into())
+    }
+
     pub fn not_found(message: impl Into<String>) -> Self {
         Self::NotFound(message.into())
+    }
+
+    pub fn conflict(message: impl Into<String>) -> Self {
+        Self::Conflict(message.into())
+    }
+
+    pub fn too_many_requests(message: impl Into<String>) -> Self {
+        Self::TooManyRequests(message.into())
+    }
+
+    pub fn service_unavailable(message: impl Into<String>) -> Self {
+        Self::ServiceUnavailable(message.into())
     }
 
     pub fn internal(message: impl Into<String>) -> Self {
@@ -29,7 +54,14 @@ impl AppError {
     fn parts(&self) -> (StatusCode, &'static str, &str) {
         match self {
             Self::BadRequest(msg) => (StatusCode::BAD_REQUEST, "bad_request", msg),
+            Self::Unauthorized(msg) => (StatusCode::UNAUTHORIZED, "unauthorized", msg),
+            Self::Forbidden(msg) => (StatusCode::FORBIDDEN, "forbidden", msg),
             Self::NotFound(msg) => (StatusCode::NOT_FOUND, "not_found", msg),
+            Self::Conflict(msg) => (StatusCode::CONFLICT, "conflict", msg),
+            Self::TooManyRequests(msg) => (StatusCode::TOO_MANY_REQUESTS, "too_many_requests", msg),
+            Self::ServiceUnavailable(msg) => {
+                (StatusCode::SERVICE_UNAVAILABLE, "service_unavailable", msg)
+            }
             Self::Internal(msg) => (StatusCode::INTERNAL_SERVER_ERROR, "internal_error", msg),
         }
     }

@@ -4,7 +4,10 @@ services:
     image: flex-server:latest
     container_name: flex-server
     ports:
-      - "8096:8096"
+      # Bind to loopback on the host by default: expose the server through the
+      # TLS reverse proxy, not directly. Change to "8096:8096" only on a
+      # trusted LAN, never on a public interface.
+      - "127.0.0.1:8096:8096"
     volumes:
       # Media library, mounted read-only.
       - ./media:/media:ro
@@ -14,4 +17,19 @@ services:
       # - ./flex.toml:/etc/flex/flex.toml:ro
     environment:
       - RUST_LOG=info
+      # First-run only: create the initial admin on startup. Uncomment, start
+      # once, then remove these before the next run so the bootstrap password
+      # does not linger.
+      # - FLEX_ADMIN_USER=admin
+      # - FLEX_ADMIN_PASSWORD=change-me
+    # Hardware transcoding (NVENC) is OFF by default. To use an NVIDIA GPU,
+    # install nvidia-container-toolkit on the host and uncomment the GPU
+    # reservation below. NVENC is used only when the GPU is visible.
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
     restart: unless-stopped

@@ -1,6 +1,8 @@
 //! Mapping between SQLite rows and `flex-protocol` types.
 
-use flex_protocol::{AudioStream, MediaItem, MediaKind, SubtitleStream, VideoStream};
+use flex_protocol::{
+    AudioStream, Device, MediaItem, MediaKind, SubtitleStream, User, UserRole, VideoStream,
+};
 use serde::{Deserialize, Serialize};
 use sqlx::sqlite::SqliteRow;
 use sqlx::Row;
@@ -62,6 +64,47 @@ pub fn library_kind_from_str(value: &str) -> flex_protocol::LibraryKind {
         "music" => Music,
         _ => Other,
     }
+}
+
+/// Serialize a [`UserRole`] to the lowercase string stored in SQLite.
+pub fn role_str(role: UserRole) -> &'static str {
+    match role {
+        UserRole::Admin => "admin",
+        UserRole::User => "user",
+    }
+}
+
+/// Parse a user role from its stored string form.
+pub fn role_from_str(value: &str) -> UserRole {
+    match value.to_ascii_lowercase().as_str() {
+        "admin" => UserRole::Admin,
+        _ => UserRole::User,
+    }
+}
+
+/// Decode a `users` row into a [`User`] (never exposes the password hash).
+pub fn row_to_user(row: &SqliteRow) -> Result<User, sqlx::Error> {
+    let role: String = row.try_get("role")?;
+    Ok(User {
+        id: row.try_get("id")?,
+        username: row.try_get("username")?,
+        role: role_from_str(&role),
+        created_at: row.try_get("created_at")?,
+    })
+}
+
+/// Decode a `devices` row into a [`Device`].
+///
+/// `current` defaults to `false`; callers mark the requesting token.
+pub fn row_to_device(row: &SqliteRow) -> Result<Device, sqlx::Error> {
+    Ok(Device {
+        id: row.try_get("id")?,
+        name: row.try_get("name")?,
+        created_at: row.try_get("created_at")?,
+        last_seen_at: row.try_get("last_seen_at")?,
+        expires_at: row.try_get("expires_at")?,
+        current: false,
+    })
 }
 
 /// Serialize a [`MediaKind`] to the lowercase string stored in SQLite.

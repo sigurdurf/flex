@@ -4,11 +4,19 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use flex_protocol::{ItemQuery, Library, MediaItem, Page};
+use flex_protocol::{Device, ItemQuery, Library, MediaItem, Page, User, UserRole};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions};
 use sqlx::{QueryBuilder, Row, Sqlite};
 
-use crate::model::{library_kind_str, row_to_media_item, NewMediaItem, SidecarTrack};
+use crate::model::{
+    library_kind_str, row_to_device, row_to_media_item, row_to_user, NewMediaItem, SidecarTrack,
+};
+
+/// Ordered list of schema migrations applied on startup (idempotent).
+const MIGRATIONS: &[&str] = &[
+    include_str!("../migrations/0001_init.sql"),
+    include_str!("../migrations/0002_auth.sql"),
+];
 
 /// Current Unix time in seconds.
 pub fn now_secs() -> i64 {
@@ -16,6 +24,17 @@ pub fn now_secs() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
+}
+
+/// Apply every [`MIGRATIONS`] script in order.
+async fn apply_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
+    for sql in MIGRATIONS {
+        sqlx::raw_sql(sql)
+            .execute(pool)
+            .await
+            .map_err(|e| anyhow::anyhow!("database migration failed: {e}"))?;
+    }
+    Ok(())
 }
 
 /// Open (creating if needed) the SQLite database and run migrations.
@@ -39,12 +58,166 @@ pub async fn init_pool(database: &str) -> anyhow::Result<SqlitePool> {
         .await
         .map_err(|e| anyhow::anyhow!("failed to open database {database}: {e}"))?;
 
-    sqlx::raw_sql(include_str!("../migrations/0001_init.sql"))
-        .execute(&pool)
-        .await
-        .map_err(|e| anyhow::anyhow!("database migration failed: {e}"))?;
+    apply_migrations(&pool).await?;
 
     Ok(pool)
+}
+
+/// An isolated in-memory database with migrations applied, for tests.
+#[cfg(test)]
+pub async fn test_pool() -> SqlitePool {
+    let options = SqliteConnectOptions::new()
+        .in_memory(true)
+        .foreign_keys(true);
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(options)
+        .await
+        .expect("open in-memory sqlite");
+    apply_migrations(&pool).await.expect("apply migrations");
+    pool
+}
+
+// --- Users ------------------------------------------------------------------
+
+/// Number of registered user accounts.
+pub async fn count_users(pool: &SqlitePool) -> Result<i64, sqlx::Error> {
+    sqlx::query_scalar("SELECT COUNT(*) FROM users")
+        .fetch_one(pool)
+        .await
+}
+
+/// Insert a new user, returning the public record.
+pub async fn create_user(
+    pool: &SqlitePool,
+    username: &str,
+    password_hash: &str,
+    role: UserRole,
+) -> Result<User, sqlx::Error> {
+    let created_at = now_secs();
+    let result = sqlx::query(
+        "INSERT INTO users (username, password_hash, role, created_at) VALUES (?, ?, ?, ?)",
+    )
+    .bind(username)
+    .bind(password_hash)
+    .bind(crate::model::role_str(role))
+    .bind(created_at)
+    .execute(pool)
+    .await?;
+
+    Ok(User {
+        id: result.last_insert_rowid(),
+        username: username.to_string(),
+        role,
+        created_at,
+    })
+}
+
+/// Fetch a user together with their password hash by exact username.
+pub async fn find_user_by_username(
+    pool: &SqlitePool,
+    username: &str,
+) -> Result<Option<(User, String)>, sqlx::Error> {
+    let row = sqlx::query(
+        "SELECT id, username, password_hash, role, created_at FROM users WHERE username = ?",
+    )
+    .bind(username)
+    .fetch_optional(pool)
+    .await?;
+
+    match row {
+        Some(row) => {
+            let hash: String = row.try_get("password_hash")?;
+            Ok(Some((row_to_user(&row)?, hash)))
+        }
+        None => Ok(None),
+    }
+}
+
+/// List every user, ordered case-insensitively by username.
+pub async fn list_users(pool: &SqlitePool) -> Result<Vec<User>, sqlx::Error> {
+    let rows = sqlx::query(
+        "SELECT id, username, password_hash, role, created_at FROM users \
+         ORDER BY username COLLATE NOCASE",
+    )
+    .fetch_all(pool)
+    .await?;
+    rows.iter().map(row_to_user).collect()
+}
+
+/// Replace a user's password hash. Returns whether a matching user existed.
+pub async fn update_password(
+    pool: &SqlitePool,
+    username: &str,
+    password_hash: &str,
+) -> Result<bool, sqlx::Error> {
+    let result = sqlx::query("UPDATE users SET password_hash = ? WHERE username = ?")
+        .bind(password_hash)
+        .bind(username)
+        .execute(pool)
+        .await?;
+    Ok(result.rows_affected() > 0)
+}
+
+/// Delete a user (cascading to their devices). Returns whether one existed.
+pub async fn delete_user(pool: &SqlitePool, username: &str) -> Result<bool, sqlx::Error> {
+    let result = sqlx::query("DELETE FROM users WHERE username = ?")
+        .bind(username)
+        .execute(pool)
+        .await?;
+    Ok(result.rows_affected() > 0)
+}
+
+// --- Devices (sessions) -----------------------------------------------------
+
+/// Issue a device token row. Returns the new device id.
+pub async fn create_device(
+    pool: &SqlitePool,
+    user_id: i64,
+    name: &str,
+    token_hash: &str,
+    created_at: i64,
+    expires_at: i64,
+) -> Result<i64, sqlx::Error> {
+    let result = sqlx::query(
+        "INSERT INTO devices (user_id, name, token_hash, created_at, last_seen_at, expires_at) \
+         VALUES (?, ?, ?, ?, ?, ?)",
+    )
+    .bind(user_id)
+    .bind(name)
+    .bind(token_hash)
+    .bind(created_at)
+    .bind(created_at)
+    .bind(expires_at)
+    .execute(pool)
+    .await?;
+    Ok(result.last_insert_rowid())
+}
+
+/// List a user's devices, most recently issued first.
+pub async fn list_devices(pool: &SqlitePool, user_id: i64) -> Result<Vec<Device>, sqlx::Error> {
+    let rows = sqlx::query(
+        "SELECT id, name, created_at, last_seen_at, expires_at FROM devices \
+         WHERE user_id = ? ORDER BY created_at DESC, id DESC",
+    )
+    .bind(user_id)
+    .fetch_all(pool)
+    .await?;
+    rows.iter().map(row_to_device).collect()
+}
+
+/// Delete one of `user_id`'s devices. Returns whether a row was removed.
+pub async fn delete_device(
+    pool: &SqlitePool,
+    user_id: i64,
+    device_id: i64,
+) -> Result<bool, sqlx::Error> {
+    let result = sqlx::query("DELETE FROM devices WHERE id = ? AND user_id = ?")
+        .bind(device_id)
+        .bind(user_id)
+        .execute(pool)
+        .await?;
+    Ok(result.rows_affected() > 0)
 }
 
 /// Insert a library if its path is new, otherwise refresh name/kind.

@@ -8,8 +8,16 @@ port = 8096
 # SQLite database file. Parent directory must exist and be writable.
 database = "./data/flex.db"
 
-# Optional: cache directory for extracted artwork/subtitles.
+# Optional: cache directory for extracted artwork/subtitles and playback
+# (remux/transcode) session artifacts. Defaults to "./data/cache".
 # cache_dir = "./data/cache"
+
+# Enable remux/transcode via ffmpeg. When false, only direct play is offered.
+transcode_enabled = true
+
+# Maximum number of concurrent remux/transcode sessions. Direct play is
+# unbounded by this limit. Keep this low on consumer GPUs (NVENC session cap).
+max_transcode_sessions = 2
 
 # Directories to index. Add one `[[libraries]]` table per library.
 [[libraries]]

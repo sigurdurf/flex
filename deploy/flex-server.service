@@ -10,6 +10,13 @@ User=flex
 Group=flex
 WorkingDirectory=/var/lib/flex
 Environment=RUST_LOG=info
+
+# First-run admin bootstrap (optional; only applies when no users exist, then
+# remove it). Prefer creating the admin with the CLI instead:
+#   flex-server --config /etc/flex/flex.toml user add admin --admin
+# Environment=FLEX_ADMIN_USER=admin
+# Environment=FLEX_ADMIN_PASSWORD=change-me
+
 ExecStart=/usr/local/bin/flex-server --config /etc/flex/flex.toml
 Restart=on-failure
 RestartSec=5
@@ -20,6 +27,12 @@ ProtectSystem=strict
 ProtectHome=read-only
 PrivateTmp=true
 ReadWritePaths=/var/lib/flex
+
+# Hardware transcoding (NVENC) is OFF by default; the server uses the libx264
+# software fallback. To enable GPU transcoding, make the NVIDIA devices and
+# driver available (e.g. add `DeviceAllow=/dev/nvidia* rw` and, depending on
+# your setup, relax the device policy). NVENC is used only when the GPU is
+# visible to the process. AV1 encode is unavailable on Turing (RTX 20-series).
 
 [Install]
 WantedBy=multi-user.target

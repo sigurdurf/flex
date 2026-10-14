@@ -1,16 +1,19 @@
 //! HTTP API: routes, handlers and byte-range streaming.
 
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::body::Body;
-use axum::extract::{Path, Query, State};
+use axum::extract::{ConnectInfo, Path, Query, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
+use axum::middleware;
 use axum::response::Response;
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use flex_protocol::{
-    Health, ItemQuery, Library, MediaItem, Page, ScanReport, SubtitleStream, API_VERSION,
+    CreateUserRequest, Device, Health, ItemQuery, Library, LoginRequest, LoginResponse, MediaItem,
+    Page, ScanReport, SubtitleStream, User, UserRole, API_VERSION,
 };
 use serde::Deserialize;
 use sqlx::SqlitePool;
@@ -19,8 +22,11 @@ use tokio_util::io::ReaderStream;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 
+use crate::auth::{self, AdminUser, AuthUser, LoginRateLimiter, RateKey};
 use crate::config::Config;
 use crate::error::AppError;
+use crate::playback::{self, SessionManager, StreamAccess};
+use crate::transcode::TranscodeCapabilities;
 use crate::{db, scanner};
 
 /// Shared application state.
@@ -28,26 +34,71 @@ use crate::{db, scanner};
 pub struct AppState {
     pub pool: SqlitePool,
     pub config: Arc<Config>,
+    /// In-memory per-`(username, IP)` login rate limiter.
+    pub rate_limiter: Arc<LoginRateLimiter>,
+    /// Live playback sessions (direct, remux, transcode).
+    pub sessions: Arc<SessionManager>,
+    /// Probed `ffmpeg` capability set.
+    pub transcode: Arc<TranscodeCapabilities>,
 }
 
 /// Build the application router.
+///
+/// Everything under `/api/v1` requires a bearer token *except* the health probe,
+/// login, the HLS playback routes (authorised by a scoped `?t=` token) and the
+/// byte-range stream route (which accepts either a bearer token or a scoped
+/// direct-play token). Those live outside the [`crate::auth::auth_middleware`]
+/// layer; see [`protected_router`].
 pub fn router(state: AppState) -> Router {
+    let protected = protected_router(state.clone());
+
     Router::new()
         .route("/api/v1/health", get(health))
+        .route("/api/v1/auth/login", post(login))
+        // Scoped playback routes: authorised by `?t=<session_token>` rather than
+        // a bearer token, because HLS players cannot attach custom headers.
+        .route(
+            "/api/v1/playback/{session_id}/master.m3u8",
+            get(playback::master),
+        )
+        .route(
+            "/api/v1/playback/{session_id}/{file}",
+            get(playback::segment),
+        )
+        // Direct play uses a Range-capable file route that accepts either a
+        // bearer token or a scoped direct-play session token.
+        .route("/api/v1/items/{id}/stream", get(stream))
+        .merge(protected)
+        .layer(CorsLayer::permissive())
+        .layer(TraceLayer::new_for_http())
+        .with_state(state)
+}
+
+/// Sub-router carrying every bearer-token-protected route.
+///
+/// The auth layer is applied via `route_layer` so it only runs for routes in
+/// this router; new protected handlers can simply be `.route`d onto it.
+pub fn protected_router(state: AppState) -> Router<AppState> {
+    Router::new()
         .route("/api/v1/libraries", get(list_libraries))
         .route("/api/v1/scan", post(trigger_scan))
         .route("/api/v1/items", get(list_items))
         .route("/api/v1/items/{id}", get(get_item))
-        .route("/api/v1/items/{id}/stream", get(stream))
         .route("/api/v1/items/{id}/artwork", get(artwork))
         .route("/api/v1/items/{id}/subtitles", get(list_subtitles))
         .route(
             "/api/v1/items/{id}/subtitles/{track}",
             get(get_subtitle_track),
         )
-        .layer(CorsLayer::permissive())
-        .layer(TraceLayer::new_for_http())
-        .with_state(state)
+        .route("/api/v1/playback/start", post(playback::start))
+        .route("/api/v1/playback/stop", post(playback::stop))
+        .route("/api/v1/system/info", get(playback::system_info))
+        .route("/api/v1/auth/logout", post(logout))
+        .route("/api/v1/auth/me", get(me))
+        .route("/api/v1/auth/devices", get(list_devices))
+        .route("/api/v1/auth/devices/{id}", delete(delete_device))
+        .route("/api/v1/auth/users", get(list_users).post(create_user))
+        .route_layer(middleware::from_fn_with_state(state, auth::auth_middleware))
 }
 
 async fn health() -> Json<Health> {
@@ -56,6 +107,141 @@ async fn health() -> Json<Health> {
         version: env!("CARGO_PKG_VERSION").to_string(),
         api_version: API_VERSION.to_string(),
     })
+}
+
+/// Exchange credentials for a device token.
+async fn login(
+    State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Json(request): Json<LoginRequest>,
+) -> Result<Json<LoginResponse>, AppError> {
+    let username = request.username.trim();
+    let key = RateKey {
+        username: username.to_string(),
+        ip: peer.ip().to_string(),
+    };
+
+    if state.rate_limiter.is_locked(&key) {
+        return Err(AppError::too_many_requests(
+            "too many failed login attempts; try again later",
+        ));
+    }
+
+    let found = db::find_user_by_username(&state.pool, username).await?;
+    let valid = found
+        .as_ref()
+        .map(|(_, hash)| auth::verify_password(&request.password, hash))
+        .unwrap_or(false);
+    if !valid {
+        state.rate_limiter.record_failure(key);
+        return Err(AppError::unauthorized("invalid username or password"));
+    }
+
+    let (user, _) = found.expect("valid credentials imply a user row");
+    state.rate_limiter.record_success(&key);
+
+    let token = auth::generate_token();
+    let token_hash = auth::hash_token(&token);
+    let now = db::now_secs();
+    let expires_at = now + auth::TOKEN_TTL_SECS;
+    let device_name = request
+        .device_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .unwrap_or("Unknown device");
+    db::create_device(
+        &state.pool,
+        user.id,
+        device_name,
+        &token_hash,
+        now,
+        expires_at,
+    )
+    .await?;
+
+    Ok(Json(LoginResponse {
+        token,
+        user,
+        expires_at: Some(expires_at),
+    }))
+}
+
+/// Revoke the token used for the request.
+async fn logout(auth: AuthUser, State(state): State<AppState>) -> Result<StatusCode, AppError> {
+    db::delete_device(&state.pool, auth.user.id, auth.device_id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Return the authenticated user.
+async fn me(auth: AuthUser) -> Json<User> {
+    Json(auth.user)
+}
+
+/// List the authenticated user's device tokens.
+async fn list_devices(
+    auth: AuthUser,
+    State(state): State<AppState>,
+) -> Result<Json<Vec<Device>>, AppError> {
+    let mut devices = db::list_devices(&state.pool, auth.user.id).await?;
+    for device in &mut devices {
+        device.current = device.id == auth.device_id;
+    }
+    Ok(Json(devices))
+}
+
+/// Revoke one of the authenticated user's other device tokens.
+async fn delete_device(
+    auth: AuthUser,
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> Result<StatusCode, AppError> {
+    if db::delete_device(&state.pool, auth.user.id, id).await? {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(AppError::not_found(format!("device {id} not found")))
+    }
+}
+
+/// List every user (admin only).
+async fn list_users(
+    _admin: AdminUser,
+    State(state): State<AppState>,
+) -> Result<Json<Vec<User>>, AppError> {
+    Ok(Json(db::list_users(&state.pool).await?))
+}
+
+/// Create a user (admin only).
+async fn create_user(
+    _admin: AdminUser,
+    State(state): State<AppState>,
+    Json(request): Json<CreateUserRequest>,
+) -> Result<Json<User>, AppError> {
+    let username = request.username.trim();
+    if username.is_empty() {
+        return Err(AppError::bad_request("username must not be empty"));
+    }
+    if request.password.is_empty() {
+        return Err(AppError::bad_request("password must not be empty"));
+    }
+    if db::find_user_by_username(&state.pool, username)
+        .await?
+        .is_some()
+    {
+        return Err(AppError::conflict(format!(
+            "user {username:?} already exists"
+        )));
+    }
+
+    let hash = auth::hash_password(&request.password)
+        .map_err(|e| AppError::internal(format!("password hashing failed: {e}")))?;
+    let role = if request.admin {
+        UserRole::Admin
+    } else {
+        UserRole::User
+    };
+    let user = db::create_user(&state.pool, username, &hash, role).await?;
+    Ok(Json(user))
 }
 
 async fn list_libraries(State(state): State<AppState>) -> Result<Json<Vec<Library>>, AppError> {
@@ -171,7 +357,11 @@ fn image_content_type(path: &str) -> &'static str {
 }
 
 /// Open a file and build a streaming body, optionally limited to `len` bytes.
-async fn file_body(path: &std::path::Path, start: u64, len: Option<u64>) -> Result<Body, AppError> {
+pub(crate) async fn file_body(
+    path: &std::path::Path,
+    start: u64,
+    len: Option<u64>,
+) -> Result<Body, AppError> {
     let mut file = tokio::fs::File::open(path).await?;
     if start > 0 {
         file.seek(SeekFrom::Start(start)).await?;
@@ -183,10 +373,19 @@ async fn file_body(path: &std::path::Path, start: u64, len: Option<u64>) -> Resu
 }
 
 async fn stream(
+    access: StreamAccess,
     State(state): State<AppState>,
     Path(id): Path<i64>,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
+    if let Some(session_item) = access.via_session_item {
+        if session_item != id {
+            return Err(AppError::forbidden(
+                "session token is not valid for this item",
+            ));
+        }
+    }
+
     let item = db::get_item(&state.pool, id)
         .await?
         .ok_or_else(|| AppError::not_found(format!("media item {id} not found")))?;

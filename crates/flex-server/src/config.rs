@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use clap::Parser;
+use clap::{Args, Parser, Subcommand};
 use flex_protocol::LibraryKind;
 use serde::Deserialize;
 
@@ -10,6 +10,10 @@ use serde::Deserialize;
 pub const DEFAULT_CONFIG_PATH: &str = "./flex.toml";
 /// Default SQLite database path.
 pub const DEFAULT_DATABASE: &str = "./data/flex.db";
+/// Default directory for transcode/playback session artifacts.
+pub const DEFAULT_CACHE_DIR: &str = "./data/cache";
+/// Default maximum number of concurrent remux/transcode sessions.
+pub const DEFAULT_MAX_TRANSCODE_SESSIONS: usize = 2;
 
 /// Extensions treated as media when no `extensions` key is present in the config.
 pub const DEFAULT_EXTENSIONS: &[&str] = &[
@@ -45,6 +49,10 @@ pub struct Config {
     pub cache_dir: Option<String>,
     pub libraries: Vec<LibraryConfig>,
     pub extensions: Vec<String>,
+    /// Whether remux/transcode (and thus `ffmpeg`) may be used at all.
+    pub transcode_enabled: bool,
+    /// Upper bound on concurrent remux/transcode sessions.
+    pub max_transcode_sessions: usize,
 }
 
 impl Default for Config {
@@ -56,7 +64,20 @@ impl Default for Config {
             cache_dir: None,
             libraries: Vec::new(),
             extensions: DEFAULT_EXTENSIONS.iter().map(|s| s.to_string()).collect(),
+            transcode_enabled: true,
+            max_transcode_sessions: DEFAULT_MAX_TRANSCODE_SESSIONS,
         }
+    }
+}
+
+impl Config {
+    /// Resolve the cache directory, falling back to [`DEFAULT_CACHE_DIR`].
+    pub fn cache_path(&self) -> PathBuf {
+        self.cache_dir
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or(DEFAULT_CACHE_DIR)
+            .into()
     }
 }
 
@@ -89,6 +110,55 @@ pub struct Cli {
     /// Add a library as `NAME=PATH` (repeatable).
     #[arg(long = "library", value_name = "NAME=PATH")]
     pub libraries: Vec<String>,
+
+    /// Administrative subcommand. When omitted the server runs normally.
+    #[command(subcommand)]
+    pub command: Option<Command>,
+}
+
+/// Top-level subcommands.
+#[derive(Debug, Clone, Subcommand)]
+pub enum Command {
+    /// Manage user accounts and their passwords.
+    User(UserCommand),
+}
+
+/// `flex-server user ...`
+#[derive(Debug, Clone, Args)]
+pub struct UserCommand {
+    #[command(subcommand)]
+    pub action: UserAction,
+}
+
+/// Actions available under the `user` subcommand.
+#[derive(Debug, Clone, Subcommand)]
+pub enum UserAction {
+    /// Create a new user.
+    Add {
+        /// Login name for the new user.
+        username: String,
+        /// Grant administrator privileges.
+        #[arg(long)]
+        admin: bool,
+        /// Password (falls back to `$FLEX_PASSWORD`, then an interactive prompt).
+        #[arg(long)]
+        password: Option<String>,
+    },
+    /// List all users.
+    List,
+    /// Change a user's password.
+    Passwd {
+        /// Login name of the user.
+        username: String,
+        /// New password (falls back to `$FLEX_PASSWORD`, then a prompt).
+        #[arg(long)]
+        password: Option<String>,
+    },
+    /// Delete a user and revoke all of their device tokens.
+    Delete {
+        /// Login name of the user.
+        username: String,
+    },
 }
 
 /// Load configuration, applying CLI overrides on top of the file (or built-in
@@ -175,5 +245,25 @@ mod tests {
         )
         .unwrap();
         assert_eq!(cfg.libraries[0].kind, LibraryKind::Other);
+    }
+
+    #[test]
+    fn cache_dir_defaults_and_overrides() {
+        let cfg = Config::default();
+        assert_eq!(cfg.cache_path(), PathBuf::from(DEFAULT_CACHE_DIR));
+        assert!(cfg.transcode_enabled);
+        assert_eq!(cfg.max_transcode_sessions, DEFAULT_MAX_TRANSCODE_SESSIONS);
+
+        let cfg: Config = toml::from_str(
+            r#"
+            cache_dir = "/var/cache/flex"
+            transcode_enabled = false
+            max_transcode_sessions = 4
+            "#,
+        )
+        .unwrap();
+        assert_eq!(cfg.cache_path(), PathBuf::from("/var/cache/flex"));
+        assert!(!cfg.transcode_enabled);
+        assert_eq!(cfg.max_transcode_sessions, 4);
     }
 }

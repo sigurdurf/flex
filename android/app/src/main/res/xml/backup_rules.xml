@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<full-backup-content>
+    <!-- EncryptedSharedPreferences' key lives in the Android Keystore and is
+         not backed up; restoring the file alone would be undecryptable. -->
+    <exclude domain="sharedpref" path="flex_secure_prefs.xml" />
+</full-backup-content>

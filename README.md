@@ -13,8 +13,15 @@ in SQLite, and stream the original files to any client that speaks the API.
 - **Library scanning** — walks configured directories and extracts container,
   video, audio and subtitle metadata with `ffprobe`.
 - **SQLite index** — a single local database file; no external services.
+- **Multi-user authentication** — Argon2id passwords and opaque per-device
+  bearer tokens, individually revocable with a default 90-day expiry. Login
+  rate limiting, and per-user authorisation on streams, artwork and subtitles.
+- **Playback with transcoding** — direct play, remux (repack without
+  re-encoding) or transcode, chosen from each client's capabilities. HLS
+  sessions with hardware acceleration (NVENC) and a `libx264` software
+  fallback. See [`docs/TRANSCODING.md`](docs/TRANSCODING.md).
 - **JSON REST API** — libraries, paginated item browsing/filtering, scan
-  triggers, and health checks (see [`docs/API.md`](docs/API.md)).
+  triggers, auth, playback and health checks (see [`docs/API.md`](docs/API.md)).
 - **HTTP Range streaming** — the stream endpoint returns `206 Partial Content`
   so media players can seek efficiently.
 - **Subtitle extraction** — embedded subtitle tracks are extracted on demand
@@ -23,6 +30,8 @@ in SQLite, and stream the original files to any client that speaks the API.
   Browsing libraries/items and embedding mpv in the GTK window (via the X11
   window id, which works under XWayland), with an external `mpv` fallback on
   pure Wayland.
+- **Android client (scaffold)** — a first-pass, unverified Android app; see
+  [`docs/ANDROID.md`](docs/ANDROID.md).
 
 ## Architecture
 
@@ -70,12 +79,46 @@ variable when `--server` is not passed:
 FLEX_SERVER=http://media-host:8096 cargo run -p flex-client
 ```
 
+### 3. Create your first user
+
+Flex has no anonymous access: every API route except `GET /health` and
+`POST /auth/login` needs a bearer token. Create the initial **admin** account
+from the server CLI, using the same `--config` you run the server with:
+
+```sh
+# Create an admin (--password, else $FLEX_PASSWORD, else an interactive prompt):
+flex-server user add admin --admin --password 'choose-a-strong-password'
+
+# Manage accounts:
+flex-server user list
+flex-server user passwd admin
+flex-server user delete <name>
+```
+
+For unattended first runs (containers, provisioning), set the bootstrap
+environment variables `FLEX_ADMIN_USER` and `FLEX_ADMIN_PASSWORD` before
+starting the server; when the database has no users yet, the admin is created on
+startup from those values. Unset them afterwards. See
+[`docs/SECURITY.md`](docs/SECURITY.md) for the auth model and
+[`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) for production.
+
+Log in and use the returned token:
+
+```sh
+TOKEN=$(curl -sS -X POST http://127.0.0.1:8096/api/v1/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"admin","password":"choose-a-strong-password","device_name":"cli"}' \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])')
+
+curl -H "Authorization: Bearer ${TOKEN}" http://127.0.0.1:8096/api/v1/items
+```
+
 ## Requirements
 
 - **Rust** stable (pinned in [`rust-toolchain.toml`](rust-toolchain.toml)),
   edition 2021.
-- **ffmpeg / ffprobe** on `PATH` (metadata probing; on-demand subtitle
-  extraction).
+- **ffmpeg / ffprobe** on `PATH` (metadata probing, on-demand subtitle
+  extraction, and playback remux/transcode).
 - **libsqlite3** development/runtime libraries (linked through `sqlx`).
 - Server: nothing else — it is headless.
 - Client: **GTK 4.6+**, **libadwaita 1.4+**, and **libmpv** (mpv 0.41 tested).
@@ -115,6 +158,24 @@ The HTTP contract is documented in [`docs/API.md`](docs/API.md). The canonical
 type definitions and route constants live in the `flex-protocol` crate, so the
 server and client stay in sync by construction.
 
+## Documentation
+
+| Guide | Contents |
+|-------|----------|
+| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Components, data flow, schema, auth and playback pipelines. |
+| [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) | Release builds, systemd, Docker, reverse proxy. |
+| [`docs/SECURITY.md`](docs/SECURITY.md) | Threat model, auth model, hardening checklist. |
+| [`docs/REVERSE_PROXY.md`](docs/REVERSE_PROXY.md) | Copy-pasteable Caddy/nginx TLS configs. |
+| [`docs/TRANSCODING.md`](docs/TRANSCODING.md) | Direct/remux/transcode decisions and `ffmpeg`. |
+| [`docs/ANDROID.md`](docs/ANDROID.md) | Building and using the Android client scaffold. |
+| [`docs/CONTRIBUTING.md`](docs/CONTRIBUTING.md) | Developer workflow and PR expectations. |
+
+## Android client
+
+A first-pass Android client lives under `android/`. It is an **unverified
+scaffold that has not been compiled**; see [`docs/ANDROID.md`](docs/ANDROID.md)
+for build instructions, token storage and playback notes.
+
 ## Docker
 
 A server-only container image is provided (the GUI client is excluded). See
@@ -152,11 +213,12 @@ workflow and pull-request expectations.
 
 The following are **not yet implemented** — they are planned directions:
 
-- [ ] Authentication and multi-user accounts
-- [ ] Transcoding / adaptive bitrate streaming
+- [x] Authentication and multi-user accounts
+- [x] Transcoding / adaptive bitrate streaming
 - [ ] Web UI
 - [ ] Online subtitle search
 - [ ] Watch state / resume / "continue watching"
+- [ ] Verified, compiled Android client (the `android/` sources are a scaffold)
 
 ## License
 

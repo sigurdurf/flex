@@ -32,6 +32,15 @@ cp config/flex.example.toml flex.toml   # edit the library paths
 
 `scripts/dev.sh` runs `cargo run -p flex-server -- --config flex.toml`.
 
+The API requires authentication, so create a local admin once (the server
+prompts for a password if `--password` is omitted):
+
+```sh
+cargo run -p flex-server -- --config flex.toml user add admin --admin --password dev
+```
+
+Then log in against the API to get a bearer token, or use the desktop client.
+
 ## Workspace commands
 
 ```sh
@@ -61,8 +70,10 @@ cargo clippy --workspace --all-targets -- -D warnings
 ## Smoke test
 
 [`scripts/smoke.sh`](../scripts/smoke.sh) generates two tiny sample videos with
-`ffmpeg`, starts a temporary server on a non-default port, and checks the scan,
-item listing and a `Range` request. It is a good pre-push sanity check:
+`ffmpeg`, creates an admin user, starts a temporary server on a non-default
+port, logs in for a bearer token, and checks the scan, item listing and a
+`Range` request — including that an unauthenticated request is rejected with
+`401`. It is a good pre-push sanity check:
 
 ```sh
 ./scripts/smoke.sh
@@ -77,9 +88,14 @@ item listing and a `Range` request. It is a good pre-push sanity check:
 - Add or update tests for behaviour changes.
 - Update the docs that your change touches: [`README.md`](../README.md),
   [`docs/API.md`](API.md), [`docs/ARCHITECTURE.md`](ARCHITECTURE.md),
-  [`docs/DEPLOYMENT.md`](DEPLOYMENT.md).
+  [`docs/DEPLOYMENT.md`](DEPLOYMENT.md), [`docs/SECURITY.md`](SECURITY.md),
+  [`docs/REVERSE_PROXY.md`](REVERSE_PROXY.md),
+  [`docs/TRANSCODING.md`](TRANSCODING.md), [`docs/ANDROID.md`](ANDROID.md).
 - If you change the wire format, change it in **`flex-protocol`** (the single
   source of truth) and update `docs/API.md` to match.
+- Authentication and playback are security- and resource-sensitive: review
+  [`docs/SECURITY.md`](SECURITY.md) before touching auth, and
+  [`docs/TRANSCODING.md`](TRANSCODING.md) before touching the transcode path.
 - Write a clear PR description: what changed, why, and how you verified it.
 
 ## License
