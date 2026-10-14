@@ -14,6 +14,82 @@ this document describes the endpoint contract.
 - List endpoints are paginated with `limit`/`offset` and return a `Page<T>`:
   `{ "items": [...], "total": <i64>, "limit": <i64>, "offset": <i64> }`.
 
+## Authentication
+
+All routes except `GET /health` and `POST /auth/login` require a bearer token:
+
+```
+Authorization: Bearer <device-token>
+```
+
+Tokens are **opaque**, random, stored hashed (SHA-256) at rest, and individually
+revocable per device. `POST /auth/login` returns the token once; the client must
+persist it (Android Keystore / libsecret). Failed logins are rate limited.
+
+### `POST /api/v1/auth/login`
+Body: `LoginRequest` `{ "username", "password", "device_name"? }`.
+Returns `LoginResponse` `{ "token", "user", "expires_at" }`, or `401`.
+
+### `POST /api/v1/auth/logout`
+Revokes the token used for the request. Returns `204`.
+
+### `GET /api/v1/auth/me`
+Returns the authenticated `User`.
+
+### `GET /api/v1/auth/devices`
+Returns `Device[]` for the current user (`current: true` marks this token).
+
+### `DELETE /api/v1/auth/devices/{id}`
+Revokes another of the user's device tokens. Returns `204`.
+
+### Admin user management
+`POST /api/v1/auth/users` (body `CreateUserRequest`) and `GET /api/v1/auth/users`
+are restricted to `admin` users. Initial admins are created from the CLI
+(`flex-server user add <name> --admin`).
+
+## Playback
+
+### `POST /api/v1/playback/start`
+Body: `PlaybackStartRequest` — the item id plus the client's
+`ClientCapabilities`. The server chooses:
+
+- **direct** — client can decode container + all streams as-is: returns a
+  Range-capable file URL (`/items/{id}/stream`).
+- **remux** — container unsupported but codecs are fine (or only the audio
+  codec is unsupported): video is copied, container/audio re-muxed, served as HLS.
+- **transcode** — video codec/profile/resolution/bitrate unsupported: re-encode
+  (hardware accelerated when available).
+
+Returns `PlaybackSession`:
+```json
+{
+  "session_id": "b3f1…",
+  "mode": "remux",
+  "stream_kind": "hls",
+  "url": "/api/v1/playback/b3f1…/master.m3u8?t=<session_token>",
+  "mime": "application/vnd.apple.mpegurl",
+  "duration_ms": 9792000,
+  "audio_stream_index": 1,
+  "subtitle_stream_index": null,
+  "session_token": "…",
+  "expires_at": 1710003600
+}
+```
+
+### `POST /api/v1/playback/stop`
+Body: `StopPlaybackRequest`. Terminates the ffmpeg process if any. Returns `204`.
+
+### `GET /api/v1/playback/{session_id}/master.m3u8` and `/playback/{session_id}/{file}`
+Serve the HLS playlist, init segment and media segments. These are authorised by
+the scoped `t=<session_token>` query parameter (not the bearer token) so any HLS
+player works without custom headers. Unknown/expired sessions return `404`.
+
+## System
+
+### `GET /api/v1/system/info`
+Returns `SystemInfo`: version, detected `hwaccels`, available hardware encoders,
+and whether transcoding is enabled.
+
 ## Endpoints
 
 ### `GET /api/v1/health`
