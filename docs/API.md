@@ -90,6 +90,49 @@ player works without custom headers. Unknown/expired sessions return `404`.
 Returns `SystemInfo`: version, detected `hwaccels`, available hardware encoders,
 and whether transcoding is enabled.
 
+## Watch state / progress
+
+All progress is scoped to the authenticated user.
+
+### `GET /api/v1/continue-watching?limit=&offset=`
+Returns `Page<ContinueWatchingEntry>`: items with saved progress that are not
+yet finished, most-recently-watched first. Each entry is `{ "item": MediaItem,
+"state": WatchState }`.
+
+### `GET /api/v1/progress`
+Returns `WatchState[]` for the current user.
+
+### `GET /api/v1/progress/{item_id}`
+Returns a single `WatchState`, or `404` if none recorded.
+
+### `PUT /api/v1/progress/{item_id}`
+Body: `UpdateProgressRequest` `{ "position_ms", "duration_ms"?, "watched"? }`.
+Upserts and returns the resulting `WatchState`. Clients send this periodically
+during playback and on stop. When `watched` is omitted the server sets it once
+`position_ms >= 90%` of `duration_ms`.
+
+### `DELETE /api/v1/progress/{item_id}`
+Clears progress for the item (mark unwatched). Returns `204`.
+
+> **Resume:** `POST /api/v1/playback/start` uses `start_position_ms` when given;
+> if omitted, the server resumes from the user's saved `WatchState` position
+> (unless the item is already marked watched).
+
+## Subtitle search
+
+### `GET /api/v1/subtitles/search`
+Query params: `query`, `languages` (repeatable or comma-separated),
+`item_id`, `season`, `episode`. Returns `SubtitleSearchResult[]`. When `item_id`
+is supplied and `query` is absent the server derives the query from the item's
+title/year. Providers are configured server-side (e.g. OpenSubtitles API key).
+
+### `POST /api/v1/subtitles/download`
+Body: `SubtitleDownloadRequest` `{ "provider", "id", "language"?, "item_id"? }`.
+When `item_id` is set the subtitle is converted to WebVTT and written next to
+the media file as a sidecar, then attached to the item. Returns
+`SubtitleDownloadResult`. Returns `400` if the provider is unknown, `404` if the
+subtitle cannot be found, and `502` on an upstream provider error.
+
 ## Endpoints
 
 ### `GET /api/v1/health`

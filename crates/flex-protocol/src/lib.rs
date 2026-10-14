@@ -118,6 +118,35 @@ pub fn system_info_path() -> String {
     format!("/api/{API_VERSION}/system/info")
 }
 
+// --- Watch state / progress -------------------------------------------------
+
+/// List the current user's resumable ("continue watching") items.
+pub fn continue_watching_path() -> String {
+    format!("/api/{API_VERSION}/continue-watching")
+}
+
+/// All watch-state rows for the current user.
+pub fn progress_path() -> String {
+    format!("/api/{API_VERSION}/progress")
+}
+
+/// Watch state for a single item.
+pub fn progress_item_path(item_id: i64) -> String {
+    format!("/api/{API_VERSION}/progress/{item_id}")
+}
+
+// --- Subtitle search --------------------------------------------------------
+
+/// Search online subtitle providers.
+pub fn subtitle_search_path() -> String {
+    format!("/api/{API_VERSION}/subtitles/search")
+}
+
+/// Download a subtitle from a provider.
+pub fn subtitle_download_path() -> String {
+    format!("/api/{API_VERSION}/subtitles/download")
+}
+
 /// A user account role.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -280,6 +309,101 @@ pub struct SystemInfo {
     pub hw_encoders: Vec<String>,
     /// Whether transcoding is enabled at all.
     pub transcode_enabled: bool,
+}
+
+/// Playback progress for a single item, scoped to one user.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WatchState {
+    pub item_id: i64,
+    /// Last known playback position.
+    pub position_ms: u64,
+    /// Total duration when known.
+    pub duration_ms: Option<u64>,
+    /// True once the item has been watched to (or past) completion.
+    pub watched: bool,
+    pub updated_at: i64,
+}
+
+/// Upsert request for [`WatchState`]. A client should send this periodically
+/// during playback and once on stop.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateProgressRequest {
+    pub position_ms: u64,
+    #[serde(default)]
+    pub duration_ms: Option<u64>,
+    /// Explicitly mark (un)watched. When omitted the server infers `watched`
+    /// from `position_ms`/`duration_ms` (>= 90% counts as watched).
+    #[serde(default)]
+    pub watched: Option<bool>,
+}
+
+/// A "continue watching" entry: the item plus the user's progress in it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContinueWatchingEntry {
+    pub item: MediaItem,
+    pub state: WatchState,
+}
+
+/// Query for online subtitle search.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SubtitleSearchQuery {
+    /// Free-text query. When omitted and `item_id` is set, the server derives
+    /// one from the item's title/year.
+    #[serde(default)]
+    pub query: Option<String>,
+    /// ISO 639-1/2 language codes to restrict results to (e.g. `en`, `eng`).
+    #[serde(default)]
+    pub languages: Vec<String>,
+    /// Restrict to subtitles matching a library item.
+    #[serde(default)]
+    pub item_id: Option<i64>,
+    #[serde(default)]
+    pub season: Option<u32>,
+    #[serde(default)]
+    pub episode: Option<u32>,
+}
+
+/// A subtitle search hit from a provider.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubtitleSearchResult {
+    /// Provider id, e.g. `opensubtitles`.
+    pub provider: String,
+    /// Provider-specific subtitle id (opaque to clients).
+    pub id: String,
+    pub language: String,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub release: Option<String>,
+    #[serde(default)]
+    pub download_count: Option<u64>,
+    #[serde(default)]
+    pub rating: Option<f32>,
+}
+
+/// Request to download a subtitle hit and install it for an item.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubtitleDownloadRequest {
+    pub provider: String,
+    pub id: String,
+    #[serde(default)]
+    pub language: Option<String>,
+    /// When set, the subtitle is saved next to the item's media file (as a
+    /// sidecar) and attached, so it becomes available offline.
+    #[serde(default)]
+    pub item_id: Option<i64>,
+}
+
+/// Result of installing a downloaded subtitle.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubtitleDownloadResult {
+    pub item_id: i64,
+    /// Server-local path of the installed sidecar (present when `item_id` was
+    /// supplied and the location was writable).
+    #[serde(default)]
+    pub path: Option<String>,
+    pub language: String,
+    pub format: String,
 }
 
 /// The category of content a library holds.
