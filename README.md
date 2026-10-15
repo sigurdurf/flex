@@ -1,4 +1,5 @@
 # Flex
+(heavily vibecoded with AI)
 
 Flex is an open-source alternative to Plex: a **headless media server** that
 indexes your video library and serves it over a JSON REST API, plus a **native
