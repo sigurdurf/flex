@@ -89,3 +89,36 @@ jobs:
         run: |
           chmod +x gradlew
           ./gradlew --no-daemon assembleDebug lintDebug
+
+  windows:
+    name: windows
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install FFmpeg
+        run: choco install ffmpeg -y --no-progress
+
+      - name: Add FFmpeg to PATH
+        run: echo "C:\ProgramData\chocolatey\lib\ffmpeg\tools\ffmpeg\bin" >> $env:GITHUB_PATH
+
+      - name: Format check (server/protocol)
+        run: cargo fmt --all -- --check
+
+      - name: Clippy (server/protocol)
+        run: cargo clippy -p flex-server -p flex-protocol -- -D warnings
+
+      - name: Build (server)
+        run: cargo build -p flex-server --release
+
+      - name: Test (server/protocol)
+        run: cargo test -p flex-server -p flex-protocol

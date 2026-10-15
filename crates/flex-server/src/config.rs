@@ -162,6 +162,9 @@ pub struct Cli {
 pub enum Command {
     /// Manage user accounts and their passwords.
     User(UserCommand),
+    /// Manage Windows service (Windows only).
+    #[cfg(windows)]
+    Service(ServiceCommand),
 }
 
 /// `flex-server user ...`
@@ -169,6 +172,14 @@ pub enum Command {
 pub struct UserCommand {
     #[command(subcommand)]
     pub action: UserAction,
+}
+
+/// `flex-server service ...` (Windows only)
+#[cfg(windows)]
+#[derive(Debug, Clone, Args)]
+pub struct ServiceCommand {
+    #[command(subcommand)]
+    pub action: ServiceAction,
 }
 
 /// Actions available under the `user` subcommand.
@@ -199,6 +210,72 @@ pub enum UserAction {
     Delete {
         /// Login name of the user.
         username: String,
+    },
+}
+
+/// Windows service actions.
+#[cfg(windows)]
+#[derive(Debug, Clone, Subcommand)]
+pub enum ServiceAction {
+    /// Install the Windows service.
+    Install {
+        /// Service name.
+        #[arg(default_value = "flex-server")]
+        name: String,
+        /// Display name.
+        #[arg(long, default_value = "Flex Server")]
+        display: String,
+        /// Description.
+        #[arg(long, default_value = "Flex headless media server")]
+        description: String,
+        /// Config file path (absolute recommended).
+        #[arg(long, env = "FLEX_CONFIG")]
+        config: Option<PathBuf>,
+        /// Working directory (defaults to directory of config).
+        #[arg(long)]
+        working_dir: Option<PathBuf>,
+        /// Database path (absolute recommended).
+        #[arg(long)]
+        database: Option<PathBuf>,
+        /// Cache directory (absolute recommended).
+        #[arg(long = "cache-dir")]
+        cache_dir: Option<PathBuf>,
+        /// Start the service immediately after install.
+        #[arg(long)]
+        start: bool,
+    },
+    /// Uninstall the Windows service.
+    Uninstall {
+        /// Service name.
+        #[arg(default_value = "flex-server")]
+        name: String,
+        /// Stop and delete.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Run as Windows service (called by SCM).
+    Run {
+        /// Service name.
+        #[arg(default_value = "flex-server")]
+        name: String,
+    },
+    /// Start a previously installed service.
+    Start {
+        /// Service name.
+        #[arg(default_value = "flex-server")]
+        name: String,
+    },
+    /// Stop a running service.
+    Stop {
+        /// Service name.
+        #[arg(default_value = "flex-server")]
+        name: String,
+    },
+    /// Query service status.
+    Status {
+        /// Service name.
+        #[arg(default_value = "flex-server")]
+        name: String,
     },
 }
 

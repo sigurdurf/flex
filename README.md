@@ -32,6 +32,8 @@ in SQLite, and stream the original files to any client that speaks the API.
   pure Wayland.
 - **Android client (scaffold)** — a first-pass, unverified Android app; see
   [`docs/ANDROID.md`](docs/ANDROID.md).
+- **Windows support** — the server binary runs on Windows (console and Windows
+  Service). See [`docs/WINDOWS.md`](docs/WINDOWS.md) for installation.
 
 ## Architecture
 
@@ -174,6 +176,7 @@ server and client stay in sync by construction.
 | [`docs/SECURITY.md`](docs/SECURITY.md) | Threat model, auth model, hardening checklist. |
 | [`docs/REVERSE_PROXY.md`](docs/REVERSE_PROXY.md) | Copy-pasteable Caddy/nginx TLS configs. |
 | [`docs/TRANSCODING.md`](docs/TRANSCODING.md) | Direct/remux/transcode decisions and `ffmpeg`. |
+| [`docs/WINDOWS.md`](docs/WINDOWS.md) | Windows console and Windows Service installation. |
 | [`docs/ANDROID.md`](docs/ANDROID.md) | Building and using the Android client scaffold. |
 | [`docs/CONTRIBUTING.md`](docs/CONTRIBUTING.md) | Developer workflow and PR expectations. |
 
