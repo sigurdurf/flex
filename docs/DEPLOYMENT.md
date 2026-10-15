@@ -19,6 +19,12 @@ sudo install -m 0755 target/release/flex-server /usr/local/bin/flex-server
 
 ## Run as a systemd service
 
+### Windows
+
+For Windows console and Windows Service installation, see [`docs/WINDOWS.md`](WINDOWS.md).
+
+### Linux (systemd)
+
 A hardened example unit is provided at
 [`deploy/flex-server.service`](../deploy/flex-server.service).
 

@@ -8,12 +8,21 @@ use std::io::{self, Write};
 use flex_protocol::UserRole;
 
 use crate::auth;
+#[cfg(windows)]
+use crate::config::ServiceAction;
 use crate::config::{Cli, Command, UserAction, UserCommand};
 use crate::db;
 
 /// Run a parsed subcommand against the configured database.
 pub async fn run(command: Command, cli: &Cli) -> anyhow::Result<()> {
-    let Command::User(UserCommand { action }) = command;
+    match command {
+        Command::User(UserCommand { action }) => run_user(action, cli).await,
+        #[cfg(windows)]
+        Command::Service(svc) => run_service(svc.action),
+    }
+}
+
+async fn run_user(action: UserAction, cli: &Cli) -> anyhow::Result<()> {
     let (config, _) = crate::config::load(cli)?;
     let pool = db::init_pool(&config.database).await?;
 
@@ -83,6 +92,45 @@ pub async fn run(command: Command, cli: &Cli) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(windows)]
+fn run_service(action: ServiceAction) -> anyhow::Result<()> {
+    use crate::windows_service;
+    match action {
+        ServiceAction::Install {
+            name,
+            display,
+            description,
+            config,
+            working_dir,
+            database,
+            cache_dir,
+            start,
+        } => {
+            windows_service::install(
+                &name,
+                &display,
+                &description,
+                config,
+                working_dir,
+                database,
+                cache_dir,
+            )?;
+            if start {
+                windows_service::start(&name)?;
+            }
+            Ok(())
+        }
+        ServiceAction::Uninstall { name, force } => windows_service::uninstall(&name, force),
+        ServiceAction::Run { name } => {
+            let _ = name;
+            windows_service::run()
+        }
+        ServiceAction::Start { name } => windows_service::start(&name),
+        ServiceAction::Stop { name } => windows_service::stop(&name),
+        ServiceAction::Status { name } => windows_service::status(&name),
+    }
 }
 
 fn require_username(username: &str) -> anyhow::Result<String> {

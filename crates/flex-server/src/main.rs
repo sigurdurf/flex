@@ -15,6 +15,10 @@ mod subtitles;
 mod transcode;
 mod user;
 
+#[cfg(windows)]
+mod windows_service;
+
+use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -85,11 +89,11 @@ async fn gc_task(sessions: Arc<SessionManager>) {
     }
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn run_server<S>(cli: Cli, shutdown: S) -> anyhow::Result<()>
+where
+    S: Future<Output = ()> + Send + 'static,
+{
     init_tracing();
-
-    let cli = Cli::parse();
 
     if let Some(command) = cli.command.clone() {
         return user::run(command, &cli).await;
@@ -166,8 +170,14 @@ async fn main() -> anyhow::Result<()> {
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),
     )
-    .with_graceful_shutdown(shutdown_signal())
+    .with_graceful_shutdown(shutdown)
     .await?;
 
     Ok(())
+}
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let cli = Cli::parse();
+    run_server(cli, shutdown_signal()).await
 }
