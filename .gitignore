@@ -10,9 +10,13 @@
 *.db-shm
 *.db-wal
 .env
+media/
 
 # Editor / OS
 .idea/
 .vscode/
 *.swp
 .DS_Store
+
+# Config
+flex.toml
