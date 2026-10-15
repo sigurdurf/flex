@@ -570,6 +570,32 @@ async fn wait_for_playlist(dir: &FsPath, timeout: Duration) -> bool {
     }
 }
 
+/// Carry the scoped token onto each request a native HLS player makes. Query
+/// parameters on a playlist URL are not inherited by relative segment URLs.
+fn scoped_playlist(playlist: &str, token: &str) -> Result<String, AppError> {
+    let sign = |file: &str| -> Result<String, AppError> {
+        // Only server-generated session filenames are allowed. Never put a
+        // session token on an external URL supplied by playlist contents.
+        let file = sanitize_hls_file(file)?;
+        Ok(format!("{file}?t={token}"))
+    };
+    let mut result = String::with_capacity(playlist.len());
+    for line in playlist.lines() {
+        if let Some((prefix, value)) = line.split_once("URI=\"") {
+            let (file, suffix) = value
+                .split_once('"')
+                .ok_or_else(|| AppError::internal("invalid HLS URI attribute"))?;
+            result.push_str(&format!("{prefix}URI=\"{}\"{suffix}", sign(file)?));
+        } else if !line.is_empty() && !line.starts_with('#') {
+            result.push_str(&sign(line)?);
+        } else {
+            result.push_str(line);
+        }
+        result.push('\n');
+    }
+    Ok(result)
+}
+
 /// Query parameters for HLS requests: the scoped session token.
 #[derive(Debug, Default, Deserialize)]
 pub struct TokenQuery {
@@ -615,7 +641,23 @@ async fn serve_hls(
         Ok(metadata) if metadata.is_file() => metadata,
         _ => return Err(AppError::not_found("playback file not found")),
     };
-    let size = metadata.len();
+    let playlist = if file.ends_with(".m3u8") {
+        let contents = tokio::fs::read_to_string(&path)
+            .await
+            .map_err(|error| AppError::internal(format!("failed to read HLS playlist: {error}")))?;
+        Some(scoped_playlist(&contents, &token)?.into_bytes())
+    } else {
+        None
+    };
+    // Ranges and Content-Length must describe the signed bytes, not the file.
+    let size = playlist
+        .as_ref()
+        .map_or(metadata.len(), |bytes| bytes.len() as u64);
+    let cache_control = if playlist.is_some() {
+        "no-store"
+    } else {
+        "private"
+    };
     let content_type = hls_content_type(&file);
     let range_header = headers
         .get(header::RANGE)
@@ -626,10 +668,16 @@ async fn serve_hls(
         Some(raw) => match crate::api::parse_range(&raw, size) {
             Ok(range) => {
                 let len = range.end - range.start + 1;
-                let body = crate::api::file_body(&path, range.start, Some(len)).await?;
+                let body = match playlist {
+                    Some(bytes) => {
+                        Body::from(bytes[range.start as usize..=range.end as usize].to_vec())
+                    }
+                    None => crate::api::file_body(&path, range.start, Some(len)).await?,
+                };
                 Response::builder()
                     .status(StatusCode::PARTIAL_CONTENT)
                     .header(header::CONTENT_TYPE, content_type)
+                    .header(header::CACHE_CONTROL, cache_control)
                     .header(header::ACCEPT_RANGES, "bytes")
                     .header(
                         header::CONTENT_RANGE,
@@ -650,10 +698,14 @@ async fn serve_hls(
             }
         },
         None => {
-            let body = crate::api::file_body(&path, 0, None).await?;
+            let body = match playlist {
+                Some(bytes) => Body::from(bytes),
+                None => crate::api::file_body(&path, 0, None).await?,
+            };
             Response::builder()
                 .status(StatusCode::OK)
                 .header(header::CONTENT_TYPE, content_type)
+                .header(header::CACHE_CONTROL, cache_control)
                 .header(header::ACCEPT_RANGES, "bytes")
                 .header(header::CONTENT_LENGTH, size)
                 .body(body)
@@ -882,6 +934,120 @@ mod tests {
         assert!(sanitize_hls_file("a\\b.ts").is_err());
         assert!(sanitize_hls_file("evil.sh").is_err());
         assert!(sanitize_hls_file("").is_err());
+    }
+
+    #[test]
+    fn signs_hls_segments_without_changing_playlist_tags() {
+        let playlist = "#EXTM3U\n#EXT-X-VERSION:3\n#EXTINF:6.0,\nseg_00001.ts\n";
+        assert_eq!(
+            scoped_playlist(playlist, "session-token").unwrap(),
+            "#EXTM3U\n#EXT-X-VERSION:3\n#EXTINF:6.0,\nseg_00001.ts?t=session-token\n"
+        );
+    }
+
+    #[test]
+    fn signs_fmp4_init_and_media_segments() {
+        let playlist = "#EXTM3U\n#EXT-X-MAP:URI=\"init.mp4\",BYTERANGE=\"100@0\"\nseg_00001.m4s\n";
+        assert_eq!(
+            scoped_playlist(playlist, "session-token").unwrap(),
+            "#EXTM3U\n#EXT-X-MAP:URI=\"init.mp4?t=session-token\",BYTERANGE=\"100@0\"\nseg_00001.m4s?t=session-token\n"
+        );
+    }
+
+    #[test]
+    fn refuses_to_sign_external_or_unsafe_playlist_urls() {
+        for playlist in [
+            "#EXTM3U\nhttps://other.example/video.ts\n",
+            "#EXTM3U\n../video.ts\n",
+            "#EXTM3U\n#EXT-X-MAP:URI=\"https://other.example/init.mp4\"\n",
+            "#EXTM3U\n#EXT-X-MAP:URI=\"init.mp4\n",
+        ] {
+            assert!(scoped_playlist(playlist, "private-token").is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn serves_signed_playlist_ranges_and_authorized_segments() {
+        use std::sync::Arc;
+
+        let temp = tempfile::tempdir().unwrap();
+        let token = "session-token";
+        let playlist = "#EXTM3U\n#EXTINF:6.0,\nseg_00001.ts\n";
+        let signed = scoped_playlist(playlist, token).unwrap();
+        tokio::fs::write(temp.path().join("master.m3u8"), playlist)
+            .await
+            .unwrap();
+        tokio::fs::write(temp.path().join("seg_00001.ts"), b"test-segment")
+            .await
+            .unwrap();
+        let sessions = Arc::new(manager());
+        let mut session = direct_session("web-test", token, 1);
+        session.dir = temp.path().into();
+        session.stream_kind = StreamKind::Hls;
+        sessions.insert_checked(session).unwrap();
+        let state = AppState {
+            pool: db::test_pool().await,
+            config: Arc::new(crate::config::Config::default()),
+            rate_limiter: Arc::new(crate::auth::LoginRateLimiter::new()),
+            sessions,
+            transcode: Arc::new(crate::transcode::TranscodeCapabilities::default()),
+            subtitles: Arc::new(crate::subtitles::SubtitleRegistry::new()),
+        };
+        let serve = |file: &str, headers, token: Option<&str>| {
+            serve_hls(
+                state.clone(),
+                "web-test".into(),
+                file.into(),
+                TokenQuery {
+                    t: token.map(str::to_string),
+                },
+                headers,
+            )
+        };
+
+        let response = serve("master.m3u8", HeaderMap::new(), Some(token))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()[header::CONTENT_LENGTH],
+            signed.len().to_string()
+        );
+        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        assert_eq!(bytes.as_ref(), signed.as_bytes());
+
+        let mut headers = HeaderMap::new();
+        headers.insert(header::RANGE, "bytes=0-15".parse().unwrap());
+        let response = serve("master.m3u8", headers, Some(token)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(
+            response.headers()[header::CONTENT_RANGE],
+            format!("bytes 0-15/{}", signed.len())
+        );
+        assert_eq!(response.headers()[header::CONTENT_LENGTH], "16");
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        assert_eq!(bytes.as_ref(), &signed.as_bytes()[..16]);
+
+        let response = serve("seg_00001.ts", HeaderMap::new(), Some(token))
+            .await
+            .unwrap();
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        assert_eq!(bytes.as_ref(), b"test-segment");
+        assert!(matches!(
+            serve("seg_00001.ts", HeaderMap::new(), None).await,
+            Err(AppError::Unauthorized(_))
+        ));
+        assert!(matches!(
+            serve("seg_00001.ts", HeaderMap::new(), Some("wrong-token")).await,
+            Err(AppError::Unauthorized(_))
+        ));
     }
 
     #[test]

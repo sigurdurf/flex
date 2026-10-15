@@ -212,7 +212,7 @@ fn push_hls(args: &mut Vec<String>, segment_type: &str, segment_name: &str) {
             "-hls_playlist_type",
             "event",
             "-hls_flags",
-            "independent_segments+append_list+omit_endlist",
+            "independent_segments+append_list",
             "-hls_segment_filename",
             segment_name,
             "master.m3u8",
@@ -481,6 +481,68 @@ mod tests {
         assert_eq!(args[i + 1], "90.500");
         let input = args.iter().position(|a| a == "-i").unwrap();
         assert!(i < input, "-ss must precede -i for fast seeking");
+    }
+
+    #[tokio::test]
+    async fn completed_hls_media_has_an_end_marker() {
+        // Exercise ffmpeg output rather than only checking a command-line flag.
+        if !tokio::process::Command::new("ffmpeg")
+            .arg("-version")
+            .output()
+            .await
+            .map(|output| output.status.success())
+            .unwrap_or(false)
+        {
+            return;
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let input = temp.path().join("sample.mkv");
+        let output = tokio::process::Command::new("ffmpeg")
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=size=64x64:rate=5",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=sample_rate=48000",
+                "-t",
+                "0.4",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "ultrafast",
+                "-c:a",
+                "aac",
+            ])
+            .arg(&input)
+            .output()
+            .await
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let output = tokio::process::Command::new("ffmpeg")
+            .args(remux_args(input.to_str().unwrap(), "h264", true, None))
+            .current_dir(temp.path())
+            .output()
+            .await
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let playlist = tokio::fs::read_to_string(temp.path().join("master.m3u8"))
+            .await
+            .unwrap();
+        assert!(playlist.contains("#EXT-X-ENDLIST"), "{playlist}");
     }
 
     #[test]
