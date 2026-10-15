@@ -82,7 +82,10 @@ Body: `StopPlaybackRequest`. Terminates the ffmpeg process if any. Returns `204`
 ### `GET /api/v1/playback/{session_id}/master.m3u8` and `/playback/{session_id}/{file}`
 Serve the HLS playlist, init segment and media segments. These are authorised by
 the scoped `t=<session_token>` query parameter (not the bearer token) so any HLS
-player works without custom headers. Unknown/expired sessions return `404`.
+player works without custom headers. Served playlists include this token on
+each segment and initialization URI because relative URLs do not inherit the
+playlist URL's query parameters. Playlist byte ranges and content lengths
+describe the resulting signed content. Unknown/expired sessions return `404`.
 
 ## System
 

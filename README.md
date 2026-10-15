@@ -113,6 +113,13 @@ TOKEN=$(curl -sS -X POST http://127.0.0.1:8096/api/v1/auth/login \
 curl -H "Authorization: Bearer ${TOKEN}" http://127.0.0.1:8096/api/v1/items
 ```
 
+### 4. Open the web client
+
+Visit `http://127.0.0.1:8096/` and sign in with the account you created. The web
+client provides library browsing, title search, sorting, grid and list views,
+resume, and browser playback. It is served directly by `flex-server` with no
+frontend build step. See [`web/README.md`](web/README.md) for usage and checks.
+
 ## Requirements
 
 - **Rust** stable (pinned in [`rust-toolchain.toml`](rust-toolchain.toml)),
@@ -204,6 +211,9 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 # End-to-end smoke test against a temporary server + sample media
 ./scripts/smoke.sh
+
+# Web client checks, using Node 22 or newer with no install step
+node --test web/tests/*.test.mjs
 ```
 
 See [`docs/CONTRIBUTING.md`](docs/CONTRIBUTING.md) for the full developer
