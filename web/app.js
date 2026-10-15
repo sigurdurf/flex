@@ -767,8 +767,9 @@ function openPlayer(playback) {
     $("player-status").textContent = "";
   };
   video.addEventListener("loadedmetadata", playback.metadata, { once: true });
-  if (session.stream_kind === "hls" && !video.canPlayType("application/vnd.apple.mpegurl")) {
-    if (!window.Hls?.isSupported()) throw new Error("This browser cannot play HLS streams. Try a browser with HLS support.");
+  // canPlayType("maybe") is only a hint. Prefer hls.js when MediaSource is
+  // available, then fall back to native HLS on browsers without MSE support.
+  if (session.stream_kind === "hls" && window.Hls?.isSupported()) {
     const hls = new window.Hls({ enableWorker: true, startPosition: 0 });
     playback.hls = hls;
     hls.on(window.Hls.Events.ERROR, (_event, data) => {
@@ -782,6 +783,8 @@ function openPlayer(playback) {
     });
     hls.loadSource(url);
     hls.attachMedia(video);
+  } else if (session.stream_kind === "hls" && !video.canPlayType("application/vnd.apple.mpegurl")) {
+    throw new Error("This browser cannot play HLS streams. Try a browser with HLS support.");
   } else video.src = url;
   video.play().catch(error => {
     if (state.player !== playback || error.name === "AbortError") return;
