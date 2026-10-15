@@ -57,6 +57,8 @@ is supported.
 
 For remux and transcode, the server starts an **HLS session** and returns a
 `PlaybackSession` pointing at a master playlist.
+The playlist receives an end marker when encoding finishes so players can
+report a finite duration, allow seeking, and detect completion.
 
 ```
 Client                     flex-server                         ffmpeg
@@ -93,6 +95,9 @@ token**:
 - The session URL returned by `/playback/start` already contains
   `?t=<session_token>`, e.g.
   `/api/v1/playback/b3f1…/master.m3u8?t=…`.
+- Served playlists also include the token on media segment and initialization
+  URLs. A relative segment URL does not inherit the playlist's query string.
+  This lets native HLS players authenticate every request without custom headers.
 - The token authorises **only that session's** playlist and segment files. It
   cannot be used to reach other items or other endpoints.
 - It is short-lived and tied to `PlaybackSession.expires_at`; unknown or expired

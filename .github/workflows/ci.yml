@@ -5,6 +5,24 @@ on:
   pull_request:
 
 jobs:
+  web:
+    name: web
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Check JavaScript and test the web client
+        run: |
+          node --check web/app.js
+          node --check web/core.mjs
+          node --test web/tests/*.test.mjs
+
   ci:
     name: ci
     runs-on: ubuntu-latest

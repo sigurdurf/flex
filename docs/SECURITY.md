@@ -161,15 +161,14 @@ internet.
 
 ### Keep files out of web roots
 
-Flex has no static file server and does not need to. Still, to avoid accidental
-exposure:
+Flex serves the web client from its configured `web_dir`. Keep that directory
+limited to the client files to avoid accidental exposure:
 
 - **Never put `flex.toml` or the SQLite database (and its `-wal`/`-shm`
   siblings) in a directory served by a web server.** They live under a data
   directory (e.g. `/var/lib/flex`), not under `/var/www`.
-- The reverse proxy should route everything to Flex's API rather than serving
-  files from disk, so there is no document root that can accidentally contain
-  config or data.
+- The reverse proxy should forward requests to Flex, which serves both the API
+  and the web client. Avoid a separate document root containing config or data.
 - Media directories are mounted **read-only** by the service (and, in Docker,
   as `:ro` volumes).
 - The systemd unit uses `ProtectSystem=strict` + `ReadWritePaths=/var/lib/flex`
