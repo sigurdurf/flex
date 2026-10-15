@@ -123,10 +123,7 @@ fn run_service(action: ServiceAction) -> anyhow::Result<()> {
             Ok(())
         }
         ServiceAction::Uninstall { name, force } => windows_service::uninstall(&name, force),
-        ServiceAction::Run { name } => {
-            let _ = name;
-            windows_service::run()
-        }
+        ServiceAction::Run { name } => windows_service::run(&name),
         ServiceAction::Start { name } => windows_service::start(&name),
         ServiceAction::Stop { name } => windows_service::stop(&name),
         ServiceAction::Status { name } => windows_service::status(&name),

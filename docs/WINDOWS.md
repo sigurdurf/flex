@@ -78,6 +78,11 @@ Advanced usage:
 - When installed as a service, the Service Control Manager sets the working directory to `System32` by default. The service registration script passes absolute paths via CLI flags (config, database, cache). This ensures paths resolve correctly regardless of working directory.
 - For best results, use absolute paths in `flex.toml` when running as a service.
 - The database defaults to `./data/flex.db` in console mode; for service usage prefer an absolute path (the install script sets `--database`).
+- The SCM launches the binary directly, so the registered command line must end in `service run <name>`; `service install` adds this automatically. If you installed with an older build (where the service appeared to start but did nothing), uninstall and reinstall to refresh the registered command line:
+  ```powershell
+  .\target\release\flex-server.exe service uninstall --force
+  .\target\release\flex-server.exe service install --config "C:\ProgramData\Flex\flex.toml" --database "C:\ProgramData\Flex\flex.db" --cache-dir "C:\ProgramData\Flex\cache" --start
+  ```
 
 ## FFmpeg
 
@@ -85,7 +90,23 @@ Download FFmpeg from [ffmpeg.org](https://ffmpeg.org/download.html) and add its 
 
 ## Logging
 
-Logs go to stdout/stderr. When running as a console app, they appear in the terminal. When running as a Windows Service, they appear in the Windows Event Log (via stdout/stderr captured by SCM in many cases) or can be redirected. For troubleshooting, run the binary in console mode first.
+Logs are written to **both** stdout and a file:
+
+- Console mode → `./data/logs/flex-server.log`
+- Windows Service → `%ProgramData%\Flex\logs\flex-server.log`
+
+Set `FLEX_LOG_DIR` to override the directory. This file is the only reliable
+place to see why a service fails to start, since a service has no console and the
+SCM does **not** capture stdout/stderr into the Windows Event Log (it only logs
+its own lifecycle events, e.g. errors `1053`/`1063`).
+
+The log level follows `RUST_LOG` (default `flex_server=info,tower_http=info`),
+e.g. `RUST_LOG=debug` for verbose output.
+
+If a service does not start, check the log file first, then the Service Control
+Manager events (Event Viewer → Windows Logs → System). The command line the SCM
+uses is visible with `sc.exe qc flex-server` and should end in
+`service run flex-server`.
 
 ## Firewall
 

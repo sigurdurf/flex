@@ -20,20 +20,76 @@ mod windows_service;
 
 use std::future::Future;
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::path::PathBuf;
+use std::sync::{Arc, Once, OnceLock};
 
 use clap::Parser;
 use flex_protocol::UserRole;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::EnvFilter;
 
 use crate::api::AppState;
 use crate::config::Cli;
 use crate::playback::SessionManager;
 
+/// Keeps the non-blocking file writer alive for the whole process. Dropping it
+/// would stop log delivery.
+static LOG_GUARD: OnceLock<tracing_appender::non_blocking::WorkerGuard> = OnceLock::new();
+
+/// Tracing is process-global, but the code paths can call `init_tracing` more
+/// than once (notably when running as a Windows service), so initialise once.
+static TRACING: Once = Once::new();
+
+/// Directory that receives `flex-server.log`.
+///
+/// `FLEX_LOG_DIR` overrides the platform default. On Windows the default is
+/// `%ProgramData%\Flex\logs`, which is where a service installed by
+/// `scripts/install-windows.ps1` will write; elsewhere `./data/logs`.
+fn log_dir() -> PathBuf {
+    if let Some(dir) = std::env::var_os("FLEX_LOG_DIR") {
+        return PathBuf::from(dir);
+    }
+    #[cfg(windows)]
+    {
+        let base = std::env::var_os("ProgramData")
+            .map_or_else(|| PathBuf::from(r"C:\ProgramData"), PathBuf::from);
+        base.join("Flex").join("logs")
+    }
+    #[cfg(not(windows))]
+    {
+        PathBuf::from("./data/logs")
+    }
+}
+
 fn init_tracing() {
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("flex_server=info,tower_http=info"));
-    tracing_subscriber::fmt().with_env_filter(filter).init();
+    TRACING.call_once(|| {
+        let filter = EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| EnvFilter::new("flex_server=info,tower_http=info"));
+
+        // A service has no console, so also persist logs to a file. If the
+        // directory cannot be created we degrade to stdout only.
+        let dir = log_dir();
+        let file_layer = match std::fs::create_dir_all(&dir) {
+            Ok(()) => {
+                let appender = tracing_appender::rolling::never(&dir, "flex-server.log");
+                let (writer, guard) = tracing_appender::non_blocking(appender);
+                let _ = LOG_GUARD.set(guard);
+                Some(
+                    tracing_subscriber::fmt::layer()
+                        .with_writer(writer)
+                        .with_ansi(false),
+                )
+            }
+            Err(_) => None,
+        };
+
+        let _ = tracing_subscriber::registry()
+            .with(filter)
+            .with(tracing_subscriber::fmt::layer())
+            .with(file_layer)
+            .try_init();
+    });
 }
 
 async fn shutdown_signal() {
