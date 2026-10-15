@@ -25,7 +25,9 @@ can be expanded to choose another server or device name.
 - Find subtitles searches providers configured on the server and downloads a
   chosen result as a sidecar. Track information is shown in the detail page;
   audio and subtitle track selection in the web player is not implemented.
-- Refresh rereads the index and watch list. It does not run a server scan.
+- Scan media scans every configured library, then reloads the index and watch
+  list. The button stays disabled during the scan and reports added, updated,
+  and removed files, along with any scan errors.
   Failed refreshes keep existing titles visible. Each failed section has a
   retry control. Empty searches and empty libraries have separate messages.
 
@@ -51,7 +53,8 @@ its codecs, native HLS support, and Media Source Extensions.
 The server serves this directory at `/`. Requests use `<server>/api/v1/...`
 with a bearer token. Each section cancels its older read request when replaced
 and checks its session before applying results. Requests time out after 20
-seconds. An authenticated `401` clears the token and returns to sign-in;
+seconds, except media scans, which wait until the scan completes.
+An authenticated `401` clears the token and returns to sign-in;
 network failures leave the session intact.
 
 Browser storage keys are:

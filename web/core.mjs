@@ -85,7 +85,7 @@ export class ApiClient {
     let timedOut = false;
     if (signal?.aborted) controller.abort();
     else signal?.addEventListener("abort", abort, { once: true });
-    const timeout = setTimeout(() => { timedOut = true; controller.abort(); }, timeoutMs);
+    const timeout = timeoutMs > 0 ? setTimeout(() => { timedOut = true; controller.abort(); }, timeoutMs) : null;
     const headers = {};
     if (this.token) headers.Authorization = "Bearer " + this.token;
     if (body !== undefined) headers["Content-Type"] = "application/json";
@@ -121,7 +121,7 @@ export class ApiClient {
       if (error instanceof ApiError) throw error;
       throw new ApiError("Couldn't reach the server. Check your connection and server address.", 0, "network");
     } finally {
-      clearTimeout(timeout);
+      if (timeout !== null) clearTimeout(timeout);
       signal?.removeEventListener("abort", abort);
     }
   }

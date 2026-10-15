@@ -430,7 +430,10 @@ pub async fn start(
             mode,
             stream_kind: StreamKind::File,
             url,
-            mime: Some(crate::api::content_type_for(item.container.as_deref()).to_string()),
+            mime: Some(
+                crate::api::content_type_for_path(&item.file_path, item.container.as_deref())
+                    .to_string(),
+            ),
             duration_ms: item.duration_ms,
             audio_stream_index,
             subtitle_stream_index,

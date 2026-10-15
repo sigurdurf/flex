@@ -473,6 +473,22 @@ pub fn content_type_for(container: Option<&str>) -> &'static str {
     }
 }
 
+/// Guess a video MIME type using the file extension when available, then the
+/// container name reported by `ffprobe`. MOV and MP4 share ffprobe format
+/// aliases, so the extension is needed to distinguish their MIME types.
+pub fn content_type_for_path(path: &str, container: Option<&str>) -> &'static str {
+    let extension = PathBuf::from(path)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    match extension.as_str() {
+        "mov" => "video/quicktime",
+        "mp4" | "m4v" => "video/mp4",
+        _ => content_type_for(container),
+    }
+}
+
 fn image_content_type(path: &str) -> &'static str {
     match path.rsplit('.').next().map(|e| e.to_ascii_lowercase()) {
         Some(ext) if ext == "png" => "image/png",
@@ -521,7 +537,7 @@ async fn stream(
         .await
         .map_err(|_| AppError::not_found(format!("file for item {id} is unavailable")))?;
     let size = metadata.len();
-    let content_type = content_type_for(item.container.as_deref());
+    let content_type = content_type_for_path(&item.file_path, item.container.as_deref());
 
     let range_header = headers
         .get(header::RANGE)

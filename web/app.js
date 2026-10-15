@@ -9,6 +9,7 @@ const state = {
   client: null, artwork: null, user: null, libraries: [], librariesLoaded: false,
   libraryId: null, query: "", sort: "title", view: "grid", items: [], total: 0,
   offset: 0, limit: 48, browseLoaded: false, browseError: null, browseAction: "load", loading: false,
+  scanning: false,
   continueEntries: [], continueLoaded: false, continueError: null,
   detailId: null, currentItem: null, progress: null,
   requests: new Map(), cleanups: new Set(), player: null, playbackAttempt: 0, authBusy: false
@@ -127,7 +128,7 @@ function resetSession() {
   state.artwork = null;
   Object.assign(state, {
     user: null, libraries: [], librariesLoaded: false, items: [], total: 0, offset: 0,
-    browseLoaded: false, browseError: null, loading: false, continueEntries: [],
+    browseLoaded: false, browseError: null, loading: false, scanning: false, continueEntries: [],
     continueLoaded: false, continueError: null, detailId: null, currentItem: null, progress: null
   });
   forgetPosters($("grid"));
@@ -138,6 +139,9 @@ function resetSession() {
   $("library-view").hidden = false;
   $("continue-section").hidden = true;
   $("toast").hidden = true;
+  $("refresh-btn").disabled = false;
+  $("refresh-btn").removeAttribute("aria-busy");
+  $("refresh-btn").querySelector("span").textContent = "Scan media";
   setMenu(false);
   document.title = "Flex";
   return client;
@@ -400,7 +404,7 @@ function renderBrowseStatus() {
   const empty = state.browseLoaded && !state.loading && !state.browseError && !state.items.length;
   $("browse-empty").hidden = !empty;
   $("empty-title").textContent = state.query ? "No matching titles" : "No media yet";
-  $("empty-description").textContent = state.query ? "Try a different title or clear your search to browse this library." : "Add media to a configured library and run a scan on your server. Refresh this page when the scan finishes.";
+  $("empty-description").textContent = state.query ? "Try a different title or clear your search to browse this library." : "Scan media to index files in your configured libraries.";
   $("empty-clear").hidden = !state.query;
 }
 
@@ -886,11 +890,52 @@ function clearSearch() {
   $("search-input").focus();
 }
 
-async function refresh() {
+async function refreshView() {
   if (!state.client) return;
-  $("refresh-btn").disabled = true;
   await Promise.allSettled([loadLibraries(), reloadItems(true), loadContinueWatching()]);
-  $("refresh-btn").disabled = false;
+}
+
+function scanSummary(report) {
+  if (!report || !["libraries", "scanned", "added", "updated", "removed"].every(key => Number.isSafeInteger(report[key])) || !Array.isArray(report.errors)) {
+    throw new Error("The server returned an unreadable scan report.");
+  }
+  if (report.libraries === 0) return "No media libraries are configured.";
+  let summary = `Scan complete. ${report.scanned.toLocaleString()} files checked, ${report.added.toLocaleString()} added, ${report.updated.toLocaleString()} updated, and ${report.removed.toLocaleString()} removed.`;
+  if (report.errors.length) {
+    const firstError = typeof report.errors[0] === "string" ? report.errors[0] : "A library could not be scanned.";
+    summary += ` ${report.errors.length.toLocaleString()} scan ${report.errors.length === 1 ? "error" : "errors"}. ${firstError.slice(0, 180)}`;
+    if (firstError.length > 180) summary += "…";
+  }
+  return summary;
+}
+
+async function scanMedia() {
+  const client = state.client;
+  if (!client || state.scanning) return;
+  const controller = beginRequest("scan");
+  state.scanning = true;
+  const refreshButton = $("refresh-btn");
+  const refreshLabel = refreshButton.querySelector("span");
+  refreshButton.disabled = true;
+  refreshButton.setAttribute("aria-busy", "true");
+  refreshLabel.textContent = "Scanning…";
+  toast("Scanning your media libraries…");
+  try {
+    const report = await client.request("/scan", { method: "POST", signal: controller.signal, timeoutMs: 0 });
+    if (!current(client, controller)) return;
+    await refreshView();
+    if (!current(client, controller)) return;
+    toast(scanSummary(report));
+  } catch (error) {
+    if (current(client, controller) && !ignoreError(error)) toast("Couldn't scan media. " + error.message);
+  } finally {
+    if (state.client === client) {
+      state.scanning = false;
+      refreshButton.disabled = false;
+      refreshButton.removeAttribute("aria-busy");
+      refreshLabel.textContent = "Scan media";
+    }
+  }
 }
 
 function bindEvents() {
@@ -903,7 +948,7 @@ function bindEvents() {
   $("logout-btn").addEventListener("click", logout);
   $("home-link").addEventListener("click", event => { event.preventDefault(); selectLibrary(null); });
   $("menu-toggle").addEventListener("click", () => setMenu($("menu-toggle").getAttribute("aria-expanded") !== "true"));
-  $("refresh-btn").addEventListener("click", refresh);
+  $("refresh-btn").addEventListener("click", scanMedia);
   $("libraries-retry").addEventListener("click", loadLibraries);
   $("continue-retry").addEventListener("click", loadContinueWatching);
   $("browse-retry").addEventListener("click", () => state.browseAction === "more" ? loadMore() : reloadItems(state.browseAction === "refresh"));
@@ -963,7 +1008,7 @@ function bindEvents() {
   window.addEventListener("offline", () => { $("offline-notice").hidden = false; });
   window.addEventListener("online", () => {
     $("offline-notice").hidden = true;
-    if (state.user && (state.browseError || state.continueError || !state.librariesLoaded)) refresh();
+    if (state.user && (state.browseError || state.continueError || !state.librariesLoaded)) refreshView();
   });
 }
 
