@@ -9,6 +9,7 @@
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
@@ -30,8 +31,20 @@ use crate::run_server;
 const SERVICE_NAME: &str = "flex-server";
 const SERVICE_TYPE: ServiceType = ServiceType::OWN_PROCESS;
 
-pub fn run() -> Result<()> {
-    windows_service::service_dispatcher::start(SERVICE_NAME, ffi_service_main)
+/// The service name the dispatcher is running under. Set by [`run`] so the
+/// callback (invoked on another thread by the SCM) can report status for the
+/// right service, and falls back to the default name.
+static ACTIVE_SERVICE_NAME: OnceLock<String> = OnceLock::new();
+
+fn service_name() -> &'static str {
+    ACTIVE_SERVICE_NAME
+        .get()
+        .map_or(SERVICE_NAME, String::as_str)
+}
+
+pub fn run(name: &str) -> Result<()> {
+    let _ = ACTIVE_SERVICE_NAME.set(name.to_string());
+    windows_service::service_dispatcher::start(name, ffi_service_main)
         .map_err(|e| anyhow!("failed to start service dispatcher: {e}"))
 }
 
@@ -62,7 +75,7 @@ fn run_service() -> Result<()> {
         }
     };
 
-    let status_handle = service_control_handler::register(SERVICE_NAME, event_handler)
+    let status_handle = service_control_handler::register(service_name(), event_handler)
         .map_err(|e| anyhow!("failed to register service control handler: {e}"))?;
 
     // Tell SCM we're starting.
@@ -78,8 +91,10 @@ fn run_service() -> Result<()> {
         })
         .map_err(|e| anyhow!("failed to set service status to start pending: {e}"))?;
 
-    // Build CLI from environment; the SCM passes minimal args, so use defaults/env.
-    let cli = Cli::parse();
+    // Build CLI from environment; the SCM launches us as `... service run`, so
+    // drop the command here to avoid re-entering the dispatcher below.
+    let mut cli = Cli::parse();
+    cli.command = None;
 
     let rt = Runtime::new().context("failed to create tokio runtime")?;
     rt.block_on(async {
@@ -183,6 +198,12 @@ pub fn install(
         args.push("--cache-dir".to_string());
         args.push(cache.to_string_lossy().into_owned());
     }
+    // The SCM runs this executable directly. It only enters the service
+    // dispatcher via the `service run` subcommand, so register it explicitly.
+    // Global flags stay before the subcommand so clap accepts them.
+    args.push("service".to_string());
+    args.push("run".to_string());
+    args.push(name.to_string());
 
     let bin_path = make_bin_path(&exe, &args);
     let service_access = ServiceAccess::CHANGE_CONFIG
