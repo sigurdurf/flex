@@ -54,8 +54,8 @@ graph LR
 
 Outside the workspace, `web/` holds the self-contained browser SPA served by
 `flex-server` (vanilla HTML/CSS/JS + vendored `hls.js`), and `android/` holds a
-first-pass Android client scaffold (unverified, not compiled); both consume the
-same HTTP API — see [`ANDROID.md`](ANDROID.md).
+native Kotlin + Compose + Media3 client that builds (debug and R8 release) and
+lints clean; both consume the same HTTP API — see [`ANDROID.md`](ANDROID.md).
 
 ## Data flow
 
@@ -150,7 +150,7 @@ flex-server (Axum)  ── decide ───────────────�
    │            → file opened, seeked, streamed as 206 Partial Content
    │
    ├─ REMUX:    spawn ffmpeg (-c:v copy, container/audio remux) ─┐
-   └─ TRANSCODE: spawn ffmpeg (NVENC, else libx264) ─────────────┤
+   └─ TRANSCODE: spawn ffmpeg (hw encoder, else libx264/libx265) ┤
                                                                  ▼
                     HLS session dir: master.m3u8 + init + segments
                     PlaybackSession { stream_kind: hls,
@@ -194,8 +194,9 @@ sequenceDiagram
 - **Direct** is I/O-bound and byte-for-byte; the server never re-encodes.
 - **Remux/transcode** run `ffmpeg` as a child process writing to a per-session
   cache directory. Hardware acceleration is chosen at startup by probing
-  `ffmpeg -hwaccels` / `ffmpeg -encoders` and preferring NVENC, with `libx264`
-  as the software fallback.
+  `ffmpeg -hwaccels` / `ffmpeg -encoders`, preferring NVENC, then VAAPI/QSV/AMF,
+  with `libx264`/`libx265` as the software fallback. H.264 output is segmented as
+  MPEG-TS; HEVC/AV1 output uses fragmented MP4.
 - HLS requests are authorised by the **scoped `?t=` session token**, not the
   bearer token, so plain HLS players work without custom headers. The token
   authorises only that session.
@@ -283,6 +284,32 @@ directly from the shared `flex-protocol` types, so there is one schema for the
 wire format and for storage. `poster_path`/`backdrop_path` hold server-local
 image paths, which the API surfaces as `poster_url`/`backdrop_url`.
 
+Per-user playback progress ("continue watching"/resume) lives in a third table,
+applied by the migration
+[`crates/flex-server/migrations/0003_progress.sql`](../crates/flex-server/migrations/0003_progress.sql).
+One row per `(user, item)` pair stores the position, the known duration, a
+`watched` flag and the update time; the index drives the most-recently-watched
+ordering behind `GET /continue-watching`:
+
+```sql
+CREATE TABLE IF NOT EXISTS watch_state (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id     INTEGER NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+    item_id     INTEGER NOT NULL REFERENCES media_items (id) ON DELETE CASCADE,
+    position_ms INTEGER NOT NULL DEFAULT 0,
+    duration_ms INTEGER,
+    watched     INTEGER NOT NULL DEFAULT 0,
+    updated_at  INTEGER NOT NULL,
+    UNIQUE (user_id, item_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_watch_state_user_updated
+    ON watch_state (user_id, updated_at DESC);
+```
+
+`watch_state` maps to the `WatchState` wire type; deleting a user or item
+cascades to their progress rows.
+
 ## API surface
 
 Full details and payload examples are in [`API.md`](API.md).
@@ -319,8 +346,9 @@ Full details and payload examples are in [`API.md`](API.md).
 | GET    | `/` and any non-`/api` path              | Static web UI (SPA fallback). **No auth.** |
 
 All routes except `/health`, `/auth/login` and static web assets require a
-bearer token; HLS playlist/segment routes are additionally authorised by the
-scoped `?t=` token.
+bearer token; HLS playlist/segment routes are authorised by the scoped `?t=`
+session token, and the direct-play stream route (`/items/{id}/stream`) accepts
+**either** a bearer token **or** a scoped `?t=` token bound to that item.
 
 ## Key design decisions & tradeoffs
 

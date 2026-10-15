@@ -16,11 +16,20 @@ this document describes the endpoint contract.
 
 ## Authentication
 
-All routes except `GET /health` and `POST /auth/login` require a bearer token:
+Most routes require a bearer token:
 
 ```
 Authorization: Bearer <device-token>
 ```
+
+The unauthenticated exceptions are `GET /health`, `POST /auth/login` and the
+static web client (any non-`/api` path). In addition, media-fetching routes can
+be authorised by a **scoped session token** instead of the bearer token, because
+plain HLS players cannot attach custom headers:
+
+- HLS playlist/segment routes (`/playback/{session_id}/…`) accept `?t=<session_token>`.
+- The direct-play stream route (`/items/{id}/stream`) accepts **either** a bearer
+  token **or** a `?t=<session_token>` bound to that item.
 
 Tokens are **opaque**, random, stored hashed (SHA-256) at rest, and individually
 revocable per device. `POST /auth/login` returns the token once; the client must
@@ -58,7 +67,8 @@ Body: `PlaybackStartRequest` — the item id plus the client's
 - **remux** — container unsupported but codecs are fine (or only the audio
   codec is unsupported): video is copied, container/audio re-muxed, served as HLS.
 - **transcode** — video codec/profile/resolution/bitrate unsupported: re-encode
-  (hardware accelerated when available).
+  (hardware accelerated when available). Both HLS modes segment with MPEG-TS for
+  H.264 output and fragmented MP4 for HEVC/AV1 output.
 
 Returns `PlaybackSession`:
 ```json
@@ -179,7 +189,8 @@ Returns `Page<MediaItem>`.
 Returns a single `MediaItem` or `404`.
 
 ### `GET /api/v1/items/{id}/stream`
-Streams the underlying file. **Must** support HTTP `Range` requests:
+Streams the underlying file. Accepts a bearer token or a direct-play
+`?t=<session_token>` scoped to this item. **Must** support HTTP `Range` requests:
 
 - `200` with `Accept-Ranges: bytes` when no range is requested.
 - `206 Partial Content` with `Content-Range` for `Range: bytes=start-end`.

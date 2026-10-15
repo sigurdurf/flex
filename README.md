@@ -19,8 +19,9 @@ in SQLite, and stream the original files to any client that speaks the API.
   rate limiting, and per-user authorisation on streams, artwork and subtitles.
 - **Playback with transcoding** — direct play, remux (repack without
   re-encoding) or transcode, chosen from each client's capabilities. HLS
-  sessions with hardware acceleration (NVENC) and a `libx264` software
-  fallback. See [`docs/TRANSCODING.md`](docs/TRANSCODING.md).
+  sessions with hardware acceleration (NVENC, VAAPI, QSV or AMF when
+  available) and a `libx264`/`libx265` software fallback. See
+  [`docs/TRANSCODING.md`](docs/TRANSCODING.md).
 - **JSON REST API** — libraries, paginated item browsing/filtering, scan
   triggers, auth, playback and health checks (see [`docs/API.md`](docs/API.md)).
 - **HTTP Range streaming** — the stream endpoint returns `206 Partial Content`
@@ -31,7 +32,8 @@ in SQLite, and stream the original files to any client that speaks the API.
   Browsing libraries/items and embedding mpv in the GTK window (via the X11
   window id, which works under XWayland), with an external `mpv` fallback on
   pure Wayland.
-- **Android client (scaffold)** — a first-pass, unverified Android app; see
+- **Android client** — a native Kotlin + Jetpack Compose app (Media3/ExoPlayer)
+  that builds (debug and R8 release) and lints clean; see
   [`docs/ANDROID.md`](docs/ANDROID.md).
 - **Windows support** — the server binary runs on Windows (console and Windows
   Service). See [`docs/WINDOWS.md`](docs/WINDOWS.md) for installation.
@@ -131,7 +133,7 @@ frontend build step. See [`web/README.md`](web/README.md) for usage and checks.
   extraction, and playback remux/transcode).
 - **libsqlite3** development/runtime libraries (linked through `sqlx`).
 - Server: nothing else — it is headless.
-- Client: **GTK 4.6+**, **libadwaita 1.4+**, and **libmpv** (mpv 0.41 tested).
+- Client: **GTK 4.10+**, **libadwaita 1.4+**, and **libmpv** (mpv 0.41 tested).
 
 ### Installing the system dependencies
 
@@ -178,14 +180,16 @@ server and client stay in sync by construction.
 | [`docs/REVERSE_PROXY.md`](docs/REVERSE_PROXY.md) | Copy-pasteable Caddy/nginx TLS configs. |
 | [`docs/TRANSCODING.md`](docs/TRANSCODING.md) | Direct/remux/transcode decisions and `ffmpeg`. |
 | [`docs/WINDOWS.md`](docs/WINDOWS.md) | Windows console and Windows Service installation. |
-| [`docs/ANDROID.md`](docs/ANDROID.md) | Building and using the Android client scaffold. |
+| [`docs/ANDROID.md`](docs/ANDROID.md) | Building and using the Android client. |
 | [`docs/CONTRIBUTING.md`](docs/CONTRIBUTING.md) | Developer workflow and PR expectations. |
 
 ## Android client
 
-A first-pass Android client lives under `android/`. It is an **unverified
-scaffold that has not been compiled**; see [`docs/ANDROID.md`](docs/ANDROID.md)
-for build instructions, token storage and playback notes.
+A native Android client lives under `android/` (Kotlin, Jetpack Compose,
+Media3/ExoPlayer). It builds (debug and R8-minified release) and lints clean
+with JDK 17, Gradle 8.7 and SDK 35; see [`docs/ANDROID.md`](docs/ANDROID.md)
+for build instructions, token storage and playback notes. On-device runtime
+behaviour has not been exercised in CI.
 
 ## Docker
 

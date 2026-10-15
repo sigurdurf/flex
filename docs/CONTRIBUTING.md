@@ -54,6 +54,15 @@ cargo clippy --workspace --all-targets -- -D warnings
 Run individual crates with `-p`, for example
 `cargo run -p flex-client -- --server http://127.0.0.1:8096`.
 
+### Web and Android
+
+CI also builds the two non-Cargo clients as separate jobs:
+
+- **Web** (`web/`) needs Node 22+ and no install step:
+  `node --test web/tests/*.test.mjs` (plus `node --check` on the modules).
+- **Android** (`android/`) needs JDK 17 and runs `./gradlew assembleDebug
+  lintDebug`; see [`ANDROID.md`](ANDROID.md) for the build workflow.
+
 ## Formatting and linting
 
 CI enforces both of these, so run them before pushing:
@@ -90,7 +99,8 @@ port, logs in for a bearer token, and checks the scan, item listing and a
   [`docs/API.md`](API.md), [`docs/ARCHITECTURE.md`](ARCHITECTURE.md),
   [`docs/DEPLOYMENT.md`](DEPLOYMENT.md), [`docs/SECURITY.md`](SECURITY.md),
   [`docs/REVERSE_PROXY.md`](REVERSE_PROXY.md),
-  [`docs/TRANSCODING.md`](TRANSCODING.md), [`docs/ANDROID.md`](ANDROID.md).
+  [`docs/TRANSCODING.md`](TRANSCODING.md), [`docs/WINDOWS.md`](WINDOWS.md),
+  [`docs/ANDROID.md`](ANDROID.md).
 - If you change the wire format, change it in **`flex-protocol`** (the single
   source of truth) and update `docs/API.md` to match.
 - Authentication and playback are security- and resource-sensitive: review

@@ -1,11 +1,13 @@
 # Flex Android client
 
-> **Status: first-pass scaffold — unverified and not compiled.** The sources
-> under `android/` are a starting point contributed for this milestone. They
-> have **not** been built in CI and are **not** known to compile. Treat the
-> instructions below as the intended workflow and expect to fix build errors as
-> the scaffold matures. The Linux desktop client
-> (`cargo run -p flex-client`) is the supported, working client today.
+> **Status: builds and lints clean.** The sources under `android/` are compiled
+> by CI (Gradle `assembleDebug lintDebug` on JDK 17 + SDK 35) and have also been
+> built locally as a debug APK and an R8-minified release APK, with 0 lint
+> errors. On-device runtime behaviour (login against a live server, actual
+> playback) has **not** been exercised — see
+> [`android/README.md`](../android/README.md#verification). The Linux desktop
+> client (`cargo run -p flex-client`) and the web client remain the
+> most-verified clients.
 
 The Android client is a native app that talks to the same Flex HTTP API as the
 desktop client and any `curl` script. It browses libraries/items, authenticates
@@ -42,12 +44,11 @@ the Gradle wrapper:
 ```
 
 The debug APK is written under `app/build/outputs/apk/debug/`. Use
-`adb devices` to confirm a target is connected.
-
-Because the scaffold is unverified, the first build may require resolving
-dependency/platform mismatches; if `./gradlew` complains, run it through
-Android Studio, which will offer to sync and download the missing SDK
-components.
+`adb devices` to confirm a target is connected. Use `./gradlew assembleRelease`
+for an R8-minified (unsigned) release APK and `./gradlew lintDebug` for Android
+Lint. The Gradle wrapper is committed, and the toolchain versions
+(AGP 8.6.1, Gradle 8.7, Kotlin 2.0.20, Media3 1.4.1) are pinned in
+[`android/gradle/libs.versions.toml`](../android/gradle/libs.versions.toml).
 
 ## Configuring the server URL
 
@@ -115,8 +116,8 @@ server can kill `ffmpeg` and free the session. See
 ## Cleartext traffic and network security
 
 Android blocks cleartext (plain HTTP) by default since API 28. For **LAN
-testing only**, the scaffold may ship a `network_security_config` with a
-cleartext exception for a specific local host/IP, e.g.:
+testing only**, the app ships a `network_security_config` with a cleartext
+exception for local addresses, e.g.:
 
 ```xml
 <network-security-config>

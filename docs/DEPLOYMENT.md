@@ -78,7 +78,7 @@ The [`Dockerfile`](../Dockerfile) builds the server only and runs it on
 
 ```sh
 docker build -t flex-server .
-docker run --rm -p 8096:8096 \
+docker run --rm -p 127.0.0.1:8096:8096 \
   -v /srv/media:/media:ro \
   -v flex-data:/data \
   -v /etc/flex/flex.toml:/etc/flex/flex.toml:ro \
@@ -92,7 +92,7 @@ To bootstrap the first admin in the container, pass the bootstrap environment
 variables once (create the account on the first run, then remove them):
 
 ```sh
-docker run --rm -p 8096:8096 \
+docker run --rm -p 127.0.0.1:8096:8096 \
   -e FLEX_ADMIN_USER=admin \
   -e FLEX_ADMIN_PASSWORD='choose-a-strong-password' \
   -v /srv/media:/media:ro \
@@ -104,7 +104,7 @@ docker run --rm -p 8096:8096 \
 ### Hardware transcoding (NVIDIA)
 
 `ffmpeg` is installed in the image, so **software** remux/transcode with
-`libx264` works out of the box. Hardware (NVENC) acceleration is **not enabled
+`libx264`/`libx265` works out of the box. Hardware (NVENC) acceleration is **not enabled
 by default** — the image starts CPU-only and requests no GPU device. To use an
 NVIDIA GPU you must pass it through explicitly with the NVIDIA Container
 Toolkit:

@@ -85,10 +85,11 @@ and opaque device tokens (per-device, short-lived).
 - Tokens are matched by **SHA-256 digest**: the submitted bearer value is hashed
   and looked up against the stored `token_hash` (a unique, indexed column); the
   raw token is never persisted.
-- The HLS **session token** (`?t=…`) is a *different*, short-lived secret scoped
-  to a single playback session. It authorises only that session's playlist and
-  segments, so HLS players that cannot set headers still can't reach anything
-  else. See [`TRANSCODING.md`](TRANSCODING.md).
+- The **scoped token** (`?t=…`) is a *different*, short-lived secret minted per
+  playback session. For HLS it authorises only that session's playlist and
+  segments; for direct play it authorises only the one item it was issued for.
+  This lets players that cannot set headers fetch media without reaching
+  anything else. See [`TRANSCODING.md`](TRANSCODING.md).
 
 ### Login rate limiting
 
@@ -111,11 +112,15 @@ and opaque device tokens (per-device, short-lived).
 
 ### Authorisation
 
-Every route except `GET /api/v1/health` and `POST /api/v1/auth/login` requires a
-valid bearer token. Admin-only routes (user management) check `role == admin`.
-**Streams, artwork and subtitle endpoints are authorised per user** — a valid
-token from a non-admin account is necessary but the request is still checked
-against the item. Do not build custom URL schemes that bypass this check.
+Every API route except `GET /api/v1/health` and `POST /api/v1/auth/login`
+requires a valid bearer token; the static web client (non-`/api` paths) is
+served unauthenticated. HLS playlist/segment routes are instead authorised by
+the scoped `?t=` session token, and the direct-play stream route accepts either
+a bearer token or a `?t=` token bound to that item. Admin-only routes (user
+management) check `role == admin`. **Streams, artwork and subtitle endpoints are
+authorised per user** — a valid token from a non-admin account is necessary but
+the request is still checked against the item. Do not build custom URL schemes
+that bypass this check.
 
 ## Why exposing Flex directly is risky
 
