@@ -105,6 +105,12 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
+      - name: Install FFmpeg
+        run: choco install ffmpeg -y --no-progress
+
+      - name: Add FFmpeg to PATH
+        run: echo "C:\ProgramData\chocolatey\lib\ffmpeg\tools\ffmpeg\bin" >> $env:GITHUB_PATH
+
       - name: Format check (server/protocol)
         run: cargo fmt --all -- --check
 
