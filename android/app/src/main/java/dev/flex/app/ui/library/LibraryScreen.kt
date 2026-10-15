@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
@@ -26,6 +27,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
@@ -41,6 +43,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.foundation.shape.RoundedCornerShape
 import coil.compose.AsyncImage
+import dev.flex.app.data.model.ContinueWatchingEntry
 import dev.flex.app.data.model.Library
 import dev.flex.app.data.model.MediaItem
 import dev.flex.app.ui.MainViewModel
@@ -50,10 +53,12 @@ import dev.flex.app.ui.MainViewModel
 fun LibraryScreen(
     viewModel: MainViewModel,
     onItemClick: (Long) -> Unit,
+    onResume: (ContinueWatchingEntry) -> Unit,
     onLogout: () -> Unit,
 ) {
     LaunchedEffect(Unit) {
         viewModel.loadLibraries()
+        viewModel.loadContinueWatching()
         viewModel.refreshItems()
     }
 
@@ -84,6 +89,14 @@ fun LibraryScreen(
                     .fillMaxWidth()
                     .padding(horizontal = 12.dp, vertical = 8.dp),
             )
+
+            if (viewModel.query.isBlank() && viewModel.continueWatching.isNotEmpty()) {
+                ContinueWatchingRow(
+                    entries = viewModel.continueWatching,
+                    artworkFor = viewModel::artworkUrl,
+                    onResume = onResume,
+                )
+            }
 
             Row(modifier = Modifier.fillMaxSize()) {
                 LibrarySidebar(
@@ -179,6 +192,93 @@ private fun SidebarEntry(
             .background(background)
             .padding(horizontal = 12.dp, vertical = 12.dp),
     )
+}
+
+@Composable
+private fun ContinueWatchingRow(
+    entries: List<ContinueWatchingEntry>,
+    artworkFor: (MediaItem) -> String?,
+    onResume: (ContinueWatchingEntry) -> Unit,
+) {
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Text(
+            text = "Continue watching",
+            style = MaterialTheme.typography.titleMedium,
+            modifier = Modifier.padding(start = 12.dp, top = 4.dp, bottom = 4.dp),
+        )
+        LazyRow(
+            contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 12.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            items(
+                count = entries.size,
+                key = { index -> entries[index].item.id },
+            ) { index ->
+                ContinueWatchingCard(
+                    entry = entries[index],
+                    artworkUrl = artworkFor(entries[index].item),
+                    onClick = { onResume(entries[index]) },
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun ContinueWatchingCard(
+    entry: ContinueWatchingEntry,
+    artworkUrl: String?,
+    onClick: () -> Unit,
+) {
+    val duration = entry.state.durationMs?.takeIf { it > 0 }
+    val fraction = duration?.let {
+        (entry.state.positionMs.toDouble() / it.toDouble()).coerceIn(0.0, 1.0).toFloat()
+    }
+
+    Column(
+        modifier = Modifier
+            .width(140.dp)
+            .clickable(onClick = onClick),
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .aspectRatio(2f / 3f)
+                .clip(RoundedCornerShape(8.dp))
+                .background(MaterialTheme.colorScheme.surfaceVariant),
+            contentAlignment = Alignment.Center,
+        ) {
+            if (artworkUrl != null) {
+                AsyncImage(
+                    model = artworkUrl,
+                    contentDescription = entry.item.title,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize(),
+                )
+            } else {
+                Icon(
+                    imageVector = Icons.Filled.Movie,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+        if (fraction != null && fraction > 0f) {
+            LinearProgressIndicator(
+                progress = { fraction },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(3.dp),
+            )
+        }
+        Spacer(Modifier.height(4.dp))
+        Text(
+            text = entry.item.title,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+            style = MaterialTheme.typography.bodySmall,
+        )
+    }
 }
 
 @Composable

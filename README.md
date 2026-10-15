@@ -216,10 +216,12 @@ workflow and pull-request expectations.
 - [x] Watch state / resume / "continue watching"
 - [x] Web UI (static SPA served by `flex-server`; see [`web/`](web/))
 - [x] Online subtitle search (OpenSubtitles provider; see [`docs/API.md`](docs/API.md))
-- [ ] Verified, compiled Android client (the `android/` sources are a scaffold)
+- [x] Compiled Android client (Kotlin + Compose + Media3; see [`android/`](android/))
 
-The Android client is the main remaining item; it cannot be built or verified
-without a JDK/Android SDK, which is not present in the current environment.
+The Android client builds (debug + R8 release) and lints clean with JDK 17,
+Gradle 8.7 and SDK 35. It has not been exercised on a physical device or
+emulator in this environment, so on-device runtime behaviour remains unverified
+— see [`android/README.md`](android/README.md#verification).
 
 ## License
 

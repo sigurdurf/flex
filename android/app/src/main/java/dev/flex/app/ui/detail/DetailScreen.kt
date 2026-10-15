@@ -22,6 +22,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
@@ -36,6 +37,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
 import dev.flex.app.data.model.MediaItem
+import dev.flex.app.data.model.WatchState
 import dev.flex.app.ui.MainViewModel
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -87,6 +89,8 @@ fun DetailScreen(
                         item = viewModel.detailItem!!,
                         backdropUrl = viewModel.backdropUrl(viewModel.detailItem!!),
                         posterUrl = viewModel.artworkUrl(viewModel.detailItem!!),
+                        watchState = viewModel.detailProgress,
+                        resumeMs = viewModel.resumePositionMs(),
                         onPlay = onPlay,
                     )
                 }
@@ -100,6 +104,8 @@ private fun DetailContent(
     item: MediaItem,
     backdropUrl: String?,
     posterUrl: String?,
+    watchState: WatchState?,
+    resumeMs: Long,
     onPlay: () -> Unit,
 ) {
     Column(
@@ -155,7 +161,16 @@ private fun DetailContent(
                 Button(onClick = onPlay) {
                     Icon(Icons.Filled.PlayArrow, contentDescription = null)
                     Spacer(Modifier.width(8.dp))
-                    Text("Play")
+                    Text(if (resumeMs > 0) "Resume ${formatClock(resumeMs)}" else "Play")
+                }
+
+                val fraction = progressFraction(watchState)
+                if (fraction != null && fraction > 0f) {
+                    Spacer(Modifier.height(8.dp))
+                    LinearProgressIndicator(
+                        progress = { fraction },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
                 }
             }
         }
@@ -244,4 +259,23 @@ fun formatDuration(durationMs: Long): String {
     val hours = totalSeconds / 3600
     val minutes = (totalSeconds % 3600) / 60
     return if (hours > 0) "%dh %dm".format(hours, minutes) else "%dm".format(minutes)
+}
+
+/** Formats a position as `mm:ss` (or `h:mm:ss` past an hour) for resume labels. */
+fun formatClock(positionMs: Long): String {
+    val totalSeconds = positionMs / 1000
+    val hours = totalSeconds / 3600
+    val minutes = (totalSeconds % 3600) / 60
+    val seconds = totalSeconds % 60
+    return if (hours > 0) {
+        "%d:%02d:%02d".format(hours, minutes, seconds)
+    } else {
+        "%d:%02d".format(minutes, seconds)
+    }
+}
+
+/** Playback completion as a 0..1 fraction, or `null` when unknown. */
+fun progressFraction(state: WatchState?): Float? {
+    val duration = state?.durationMs?.takeIf { it > 0 } ?: return null
+    return (state.positionMs.toDouble() / duration.toDouble()).coerceIn(0.0, 1.0).toFloat()
 }

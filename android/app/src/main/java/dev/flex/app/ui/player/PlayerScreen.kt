@@ -25,12 +25,18 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.media3.common.MediaItem as Media3MediaItem
+import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.ui.PlayerView
 import dev.flex.app.ui.MainViewModel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 
+private const val PROGRESS_INTERVAL_MS = 5_000L
+
+@androidx.annotation.OptIn(UnstableApi::class)
 @Composable
 fun PlayerScreen(
     viewModel: MainViewModel,
@@ -48,13 +54,16 @@ fun PlayerScreen(
 
     DisposableEffect(Unit) {
         onDispose {
+            val position = player.currentPosition
+            val duration = player.duration.takeIf { it > 0 }
+            viewModel.saveProgress(position, duration)
             player.release()
             viewModel.stopPlayback()
         }
     }
 
     LaunchedEffect(itemId) {
-        viewModel.startPlayback(itemId)
+        viewModel.startPlayback(itemId, viewModel.resumePositionMs())
     }
 
     val state = viewModel.player
@@ -72,7 +81,16 @@ fun PlayerScreen(
             .createMediaSource(Media3MediaItem.fromUri(url))
         player.setMediaSource(mediaSource)
         player.prepare()
+        if (state.startPositionMs > 0) {
+            player.seekTo(state.startPositionMs)
+        }
         player.play()
+
+        while (isActive) {
+            delay(PROGRESS_INTERVAL_MS)
+            val duration = player.duration.takeIf { it > 0 }
+            viewModel.saveProgress(player.currentPosition, duration)
+        }
     }
 
     Box(
@@ -118,7 +136,7 @@ fun PlayerScreen(
                     text = error,
                     color = MaterialTheme.colorScheme.error,
                 )
-                Button(onClick = { viewModel.startPlayback(itemId) }) {
+                Button(onClick = { viewModel.startPlayback(itemId, viewModel.resumePositionMs()) }) {
                     Text("Retry")
                 }
             }

@@ -9,9 +9,11 @@ import androidx.lifecycle.viewModelScope
 import dev.flex.app.FlexApp
 import dev.flex.app.data.FlexRepository
 import dev.flex.app.data.TokenStore
+import dev.flex.app.data.model.ContinueWatchingEntry
 import dev.flex.app.data.model.Library
 import dev.flex.app.data.model.MediaItem
 import dev.flex.app.data.model.PlaybackMode
+import dev.flex.app.data.model.WatchState
 import kotlinx.coroutines.launch
 
 data class PlayerUiState(
@@ -19,6 +21,8 @@ data class PlayerUiState(
     val url: String? = null,
     val mode: PlaybackMode? = null,
     val sessionId: String? = null,
+    val itemId: Long? = null,
+    val startPositionMs: Long = 0,
     val error: String? = null,
 )
 
@@ -128,6 +132,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    // --- Continue watching ---------------------------------------------------
+    var continueWatching by mutableStateOf<List<ContinueWatchingEntry>>(emptyList())
+        private set
+
+    fun loadContinueWatching() {
+        viewModelScope.launch {
+            runCatching { repository.continueWatching() }
+                .onSuccess { continueWatching = it }
+        }
+    }
+
     // --- Detail --------------------------------------------------------------
     var detailItem by mutableStateOf<MediaItem?>(null)
         private set
@@ -135,17 +150,38 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         private set
     var detailError by mutableStateOf<String?>(null)
         private set
+    var detailProgress by mutableStateOf<WatchState?>(null)
+        private set
+
+    // Set when resuming from a "Continue watching" card so playback can start
+    // without first loading the detail page.
+    private var pendingResume by mutableStateOf<WatchState?>(null)
 
     fun loadDetail(id: Long) {
         detailLoading = true
         detailError = null
         detailItem = null
+        detailProgress = null
+        pendingResume = null
         viewModelScope.launch {
             runCatching { repository.item(id) }
                 .onSuccess { detailItem = it }
                 .onFailure { detailError = it.message ?: "Failed to load item" }
+            runCatching { repository.progress(id) }
+                .onSuccess { detailProgress = it }
             detailLoading = false
         }
+    }
+
+    /** Remembers a resume point when launching from a "Continue watching" card. */
+    fun setResumeOverride(state: WatchState?) {
+        pendingResume = state
+    }
+
+    /** Resume position for the next playback, or 0 when there is nothing to resume. */
+    fun resumePositionMs(): Long {
+        val state = pendingResume ?: detailProgress ?: return 0
+        return if (!state.watched && state.positionMs > 0) state.positionMs else 0
     }
 
     fun artworkUrl(item: MediaItem): String? = repository.artworkUrl(item)
@@ -158,25 +194,34 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun currentToken(): String? = tokenStore.token
 
-    fun startPlayback(itemId: Long) {
-        player = PlayerUiState(loading = true)
+    fun startPlayback(itemId: Long, startPositionMs: Long = 0) {
+        player = PlayerUiState(loading = true, itemId = itemId, startPositionMs = startPositionMs)
         viewModelScope.launch {
-            runCatching { repository.startPlayback(itemId) }
+            runCatching { repository.startPlayback(itemId, startPositionMs) }
                 .onSuccess { session ->
                     player = PlayerUiState(
                         loading = false,
                         url = repository.absoluteUrl(session.url),
                         mode = session.mode,
                         sessionId = session.sessionId,
+                        itemId = itemId,
+                        startPositionMs = startPositionMs,
                     )
                 }
                 .onFailure { error ->
                     player = PlayerUiState(
                         loading = false,
+                        itemId = itemId,
                         error = error.message ?: "Playback failed to start",
                     )
                 }
         }
+    }
+
+    /** Persists the current playback position; safe to call repeatedly during playback. */
+    fun saveProgress(positionMs: Long, durationMs: Long?) {
+        val itemId = player.itemId ?: return
+        viewModelScope.launch { repository.saveProgress(itemId, positionMs, durationMs) }
     }
 
     fun stopPlayback() {
@@ -187,6 +232,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    /** Clears saved progress for an item and drops it from "Continue watching". */
+    fun clearProgress(itemId: Long) {
+        viewModelScope.launch {
+            repository.clearProgress(itemId)
+            if (detailItem?.id == itemId) detailProgress = null
+            continueWatching = continueWatching.filterNot { it.item.id == itemId }
+        }
+    }
+
     // --- Logout --------------------------------------------------------------
     fun logout(onDone: () -> Unit) {
         viewModelScope.launch {
@@ -194,6 +248,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             libraries = emptyList()
             items = emptyList()
             detailItem = null
+            detailProgress = null
+            continueWatching = emptyList()
             isLoggedIn = false
             onDone()
         }

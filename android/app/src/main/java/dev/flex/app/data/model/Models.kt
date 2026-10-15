@@ -109,6 +109,28 @@ data class StopPlaybackRequest(
 )
 
 @Serializable
+data class WatchState(
+    @SerialName("item_id") val itemId: Long,
+    @SerialName("position_ms") val positionMs: Long,
+    @SerialName("duration_ms") val durationMs: Long? = null,
+    val watched: Boolean = false,
+    @SerialName("updated_at") val updatedAt: Long,
+)
+
+@Serializable
+data class UpdateProgressRequest(
+    @SerialName("position_ms") val positionMs: Long,
+    @SerialName("duration_ms") val durationMs: Long? = null,
+    val watched: Boolean? = null,
+)
+
+@Serializable
+data class ContinueWatchingEntry(
+    val item: MediaItem,
+    val state: WatchState,
+)
+
+@Serializable
 enum class LibraryKind {
     @SerialName("movies")
     MOVIES,

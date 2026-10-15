@@ -1,6 +1,7 @@
 package dev.flex.app.data
 
 import dev.flex.app.data.model.ClientCapabilities
+import dev.flex.app.data.model.ContinueWatchingEntry
 import dev.flex.app.data.model.Library
 import dev.flex.app.data.model.LoginRequest
 import dev.flex.app.data.model.MediaItem
@@ -8,7 +9,9 @@ import dev.flex.app.data.model.Page
 import dev.flex.app.data.model.PlaybackSession
 import dev.flex.app.data.model.PlaybackStartRequest
 import dev.flex.app.data.model.StopPlaybackRequest
+import dev.flex.app.data.model.UpdateProgressRequest
 import dev.flex.app.data.model.User
+import dev.flex.app.data.model.WatchState
 
 class FlexRepository(
     private val tokenStore: TokenStore,
@@ -57,11 +60,43 @@ class FlexRepository(
 
     suspend fun item(id: Long): MediaItem = api.item(id)
 
-    suspend fun startPlayback(itemId: Long): PlaybackSession =
+    suspend fun continueWatching(
+        limit: Int = CONTINUE_LIMIT,
+        offset: Int = 0,
+    ): List<ContinueWatchingEntry> =
+        api.continueWatching(limit = limit.toLong(), offset = offset.toLong()).items
+
+    /** Returns the saved progress for an item, or `null` when none is recorded (HTTP 404). */
+    suspend fun progress(itemId: Long): WatchState? {
+        val response = api.progress(itemId)
+        return if (response.isSuccessful) response.body() else null
+    }
+
+    /** Best-effort progress upsert; playback must never fail because this does. */
+    suspend fun saveProgress(
+        itemId: Long,
+        positionMs: Long,
+        durationMs: Long?,
+    ): WatchState? = runCatching {
+        api.updateProgress(
+            itemId,
+            UpdateProgressRequest(
+                positionMs = positionMs.coerceAtLeast(0),
+                durationMs = durationMs?.takeIf { it > 0 },
+            ),
+        )
+    }.getOrNull()
+
+    suspend fun clearProgress(itemId: Long) {
+        runCatching { api.deleteProgress(itemId) }
+    }
+
+    suspend fun startPlayback(itemId: Long, startPositionMs: Long? = null): PlaybackSession =
         api.playbackStart(
             PlaybackStartRequest(
                 itemId = itemId,
                 capabilities = androidCapabilities(),
+                startPositionMs = startPositionMs?.takeIf { it > 0 },
             ),
         )
 
@@ -82,6 +117,7 @@ class FlexRepository(
 
     companion object {
         const val PAGE_SIZE = 50
+        const val CONTINUE_LIMIT = 20
 
         /**
          * Advertises what ExoPlayer on Android can typically decode. The server

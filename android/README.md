@@ -5,12 +5,10 @@ to a `flex-server` over the HTTP API described in
 [`docs/API.md`](../docs/API.md), whose wire types live in
 [`crates/flex-protocol`](../crates/flex-protocol/src/lib.rs).
 
-> **UNVERIFIED — not compiled in this environment.**
-> This project was scaffolded in an environment with **no JDK, Gradle, Android
-> SDK, or Kotlin toolchain**, so it has **not** been built, linted, or run. The
-> source is written to be conventional and internally consistent, but treat the
-> first `./gradlew assembleDebug` as the real test. See
-> [Unverified / risky](#unverified--risky) below.
+> **Built, linted, and packaged** with JDK 17 (Temurin), Gradle 8.7, and Android
+> SDK 35. `./gradlew assembleDebug`, `./gradlew assembleRelease` (R8/minified),
+> and `./gradlew lintDebug` all pass with **0 lint errors**. See
+> [Verification](#verification).
 
 ## Features
 
@@ -20,22 +18,26 @@ to a `flex-server` over the HTTP API described in
 2. **Browse** — library sidebar + adaptive poster grid from `GET /api/v1/items`
    (paginated) with posters from `GET /api/v1/items/{id}/artwork?type=poster`.
    The search box maps to the `q` query parameter.
-3. **Detail** — title, year, container, duration, and video/audio/subtitle track
-   listings, plus a Play button.
-4. **Player** — Media3 `ExoPlayer` in a `PlayerView`. On Play it calls
+3. **Continue watching** — a horizontal row above the grid, from
+   `GET /api/v1/continue-watching`, showing each in-progress item with a progress
+   bar. Tapping a card resumes playback immediately.
+4. **Detail** — title, year, container, duration, and video/audio/subtitle track
+   listings; the Play button becomes **Resume mm:ss** and a progress bar is shown
+   when saved progress exists.
+5. **Player** — Media3 `ExoPlayer` in a `PlayerView`. On Play it calls
    `POST /api/v1/playback/start` advertising typical Android decoder
-   capabilities. The returned `url` (a direct file URL or an HLS master playlist
-   carrying `?t=<session_token>`) is handed straight to ExoPlayer.
-5. **Logout** — `POST /api/v1/auth/logout`, clears the stored token, returns to
+   capabilities, passing `start_position_ms` to resume. The returned `url` (a
+   direct file URL or an HLS master playlist carrying `?t=<session_token>`) is
+   handed straight to ExoPlayer. Progress is saved every 5 s and on exit via
+   `PUT /api/v1/progress/{item_id}`.
+6. **Logout** — `POST /api/v1/auth/logout`, clears the stored token, returns to
    login.
 
 ## Prerequisites
 
-- **Android Studio** Ladybug (2024.2) or newer, **or** a standalone JDK 17 +
-  Android command-line tools.
-- **Android SDK Platform 35** and **Build-Tools** for it (install via SDK
-  Manager).
-- **Gradle 8.7+**. The wrapper is expected (see below).
+- **JDK 17** (verified with Temurin 17.0.20.1) and **Android SDK Platform 35**
+  plus its **Build-Tools** (install via `sdkmanager`).
+- The Gradle wrapper is committed; no separate Gradle install is needed.
 - A reachable `flex-server` instance.
 
 ## Toolchain
@@ -61,20 +63,22 @@ Versions are centralized in [`gradle/libs.versions.toml`](gradle/libs.versions.t
 
 ## Opening / building
 
-There is **no `gradle-wrapper.jar`** in this repository (binaries are not
-generated here). Generate it once with a local Gradle, or just let Android
-Studio do it:
+The Gradle wrapper is committed (`gradlew`, `gradle/wrapper/gradle-wrapper.jar`).
+Point the build at your SDK by creating `android/local.properties` (gitignored):
 
-```bash
-# From the android/ directory, with Gradle 8.7+ on your PATH:
-gradle wrapper --gradle-version 8.7
-
-# Then build:
-./gradlew assembleDebug
+```properties
+sdk.dir=/path/to/Android/Sdk
 ```
 
-Or: **Android Studio → Open → select the `android/` directory.** Studio will
-provision the wrapper and sync.
+Then, from `android/`:
+
+```bash
+./gradlew assembleDebug     # debug APK
+./gradlew assembleRelease   # R8-minified (unsigned) release APK
+./gradlew lintDebug         # Android Lint (currently 0 errors)
+```
+
+Or: **Android Studio → Open → select the `android/` directory.**
 
 ## Setting the server URL
 
@@ -103,6 +107,8 @@ so LAN servers work out of the box. Tighten this for public deployments.
 | Poster       | `GET /api/v1/items/{id}/artwork?type=poster`    |
 | Start play   | `POST /api/v1/playback/start`                   |
 | Stop play    | `POST /api/v1/playback/stop`                    |
+| Continue     | `GET /api/v1/continue-watching`                 |
+| Progress     | `GET/PUT/DELETE /api/v1/progress/{item_id}`     |
 
 All non-login requests carry `Authorization: Bearer <token>` via
 `AuthInterceptor`.
@@ -131,26 +137,32 @@ app/src/main/java/dev/flex/app/
     └── theme/{Color,Theme,Type}.kt
 ```
 
-## Unverified / risky
+## Verification
 
-- **Nothing here has been compiled.** The Gradle wrapper jar is absent; AGP,
-  Kotlin, Compose, Media3 and library versions are pinned to plausible,
-  mutually-compatible releases but were not resolved from a repository.
-- **`security-crypto` 1.1.0-alpha06** — the `EncryptedSharedPreferences` API
-  used here matches that alpha; Google has since deprecated the library. If a
-  newer version is pulled, the API/signatures may differ.
-- **kotlinx-serialization converter** — relies on
-  `retrofit2-kotlinx-serialization-converter`'s `asConverterFactory` shipped in
-  Retrofit 2.11.0. Verify the artifact resolves.
-- **Playback auth model** — per `docs/API.md`, playback URLs carry a scoped
-  `?t=` token and need no headers. The player *also* attaches the bearer token
-  as a default request property for robustness (covers direct-play file URLs);
-  if the server rejects unexpected headers on scoped URLs, remove it in
-  `PlayerScreen.kt`.
-- **Direct-play URL assumption** — the task states the returned URL always
-  carries auth; if a v1 server returns a bare `/items/{id}/stream` for
-  `direct` mode, ExoPlayer depends on the bearer header above.
-- **Cleartext traffic** is enabled globally for LAN convenience; not
-  production-hardened.
-- **No tests, no lint run.** Iconography uses Material icons; the launcher icon
-  is a simple vector.
+Built and checked with JDK 17 (Temurin 17.0.20.1), Gradle 8.7, Android
+compileSdk/targetSdk 35, Build-Tools 35.0.0:
+
+| Task                                    | Result                       |
+|-----------------------------------------|------------------------------|
+| `./gradlew assembleDebug`               | ✅ `app-debug.apk`           |
+| `./gradlew assembleRelease` (R8)        | ✅ `app-release-unsigned.apk`|
+| `./gradlew lintDebug`                   | ✅ 0 errors (37 warnings)    |
+
+The build was **not run on a device/emulator** here, so runtime behaviour
+(login against a live server, actual playback) is unverified.
+
+### Known limitations / notes
+
+- **`security-crypto` 1.1.0-alpha06** — `EncryptedSharedPreferences` is now
+  deprecated by Google; pinning the alpha keeps the API stable. Migrate to
+  `DataStore` + your own keystore wrapping eventually.
+- **Playback auth model** — playback URLs carry a scoped `?t=` token and need no
+  headers. The player *also* attaches the bearer token as a default request
+  property for robustness (covers bare direct-play file URLs).
+- **Direct-play resume** — the server only applies resume server-side for
+  remux/transcode; for direct play the client passes `start_position_ms` and
+  seeks, which is why the resume position is threaded through the ViewModel.
+- **No unit/instrumented tests** yet. Iconography uses Material icons; the
+  launcher icon is a simple vector.
+- **Cleartext traffic** is enabled via `network_security_config.xml` for LAN
+  convenience; tighten for public deployments.

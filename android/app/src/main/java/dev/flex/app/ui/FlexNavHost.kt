@@ -40,6 +40,10 @@ fun FlexNavHost(viewModel: MainViewModel = viewModel()) {
             LibraryScreen(
                 viewModel = viewModel,
                 onItemClick = { id -> navController.navigate(Routes.detail(id)) },
+                onResume = { entry ->
+                    viewModel.setResumeOverride(entry.state)
+                    navController.navigate(Routes.player(entry.item.id))
+                },
                 onLogout = {
                     viewModel.logout {
                         navController.navigate(Routes.LOGIN) {
