@@ -63,6 +63,37 @@ fn first_container(format_name: Option<&str>) -> Option<String> {
         .filter(|token| !token.is_empty())
 }
 
+/// Canonical container token for an item, matching the names clients advertise
+/// (`mp4`, `matroska`, `webm`, `mpegts`, ...).
+///
+/// An ffprobe `format_name` is a list of demuxer aliases and cannot tell
+/// related formats apart: `.mp4` and `.mov` both report `mov,mp4,...`, and
+/// `.mkv` and `.webm` both report `matroska,webm`. The file extension is
+/// authoritative, so use it and fall back to the first `format_name` token
+/// only when the extension is unrecognised.
+fn container_of(item: &MediaItem) -> Option<String> {
+    let ext = item
+        .file_path
+        .rsplit('.')
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let token = match ext.as_str() {
+        "mp4" | "m4v" => "mp4",
+        "m4a" => "m4a",
+        "mov" => "mov",
+        "mkv" => "matroska",
+        "webm" => "webm",
+        "ts" | "m2ts" | "mts" => "mpegts",
+        "avi" => "avi",
+        "wmv" => "asf",
+        "flv" => "flv",
+        "mpg" | "mpeg" => "mpeg",
+        _ => return first_container(item.container.as_deref()),
+    };
+    Some(token.to_string())
+}
+
 /// Containers that a typical client can consume directly while still claiming
 /// HLS support; anything else (e.g. Matroska) forces a remux for HLS clients.
 fn is_hls_friendly(container: &str) -> bool {
@@ -81,7 +112,7 @@ pub fn audio_supported(item: &MediaItem, caps: &ClientCapabilities) -> bool {
 /// Empty capability lists are treated as "supports nothing", forcing remux or
 /// transcode so callers can drive each branch deterministically.
 pub fn decide_mode(item: &MediaItem, caps: &ClientCapabilities) -> PlaybackMode {
-    let container = first_container(item.container.as_deref());
+    let container = container_of(item);
     let container_ok = container
         .as_deref()
         .map(|c| contains_ci(&caps.containers, c))
@@ -706,7 +737,7 @@ mod tests {
         }
     }
 
-    fn item(container: &str, video_codec: &str, audio_codec: &str) -> MediaItem {
+    fn item(ext: &str, container: &str, video_codec: &str, audio_codec: &str) -> MediaItem {
         MediaItem {
             id: 1,
             library_id: 1,
@@ -715,7 +746,7 @@ mod tests {
             sort_title: "test".into(),
             year: None,
             overview: None,
-            file_path: "/media/test.mkv".into(),
+            file_path: format!("/media/test.{ext}"),
             file_size: 1,
             container: Some(container.into()),
             duration_ms: Some(1000),
@@ -744,21 +775,52 @@ mod tests {
 
     #[test]
     fn decides_direct() {
-        let item = item("mov,mp4,m4a,3gp,3g2,mj2", "h264", "aac");
-        let caps = caps(&["mov", "mp4"], &["h264"], &["aac"], None, None, None, true);
+        // Real clients advertise "mp4", not ffprobe's first alias "mov".
+        let item = item("mp4", "mov,mp4,m4a,3gp,3g2,mj2", "h264", "aac");
+        let caps = caps(&["mp4"], &["h264"], &["aac"], None, None, None, true);
         assert_eq!(decide_mode(&item, &caps), PlaybackMode::Direct);
     }
 
     #[test]
+    fn extension_disambiguates_mp4_from_mov() {
+        // ffprobe reports the same format_name for .mp4 and .mov; the extension
+        // decides, so a client that only claims "mp4" remuxes a .mov.
+        let caps = caps(&["mp4"], &["h264"], &["aac"], None, None, None, false);
+        let same_format = "mov,mp4,m4a,3gp,3g2,mj2";
+        assert_eq!(
+            decide_mode(&item("mp4", same_format, "h264", "aac"), &caps),
+            PlaybackMode::Direct
+        );
+        assert_eq!(
+            decide_mode(&item("mov", same_format, "h264", "aac"), &caps),
+            PlaybackMode::Remux
+        );
+    }
+
+    #[test]
+    fn extension_disambiguates_webm_from_mkv() {
+        let caps = caps(&["webm"], &["vp9"], &["opus"], None, None, None, false);
+        let same_format = "matroska,webm";
+        assert_eq!(
+            decide_mode(&item("webm", same_format, "vp9", "opus"), &caps),
+            PlaybackMode::Direct
+        );
+        assert_eq!(
+            decide_mode(&item("mkv", same_format, "vp9", "opus"), &caps),
+            PlaybackMode::Remux
+        );
+    }
+
+    #[test]
     fn decides_remux_for_unsupported_container() {
-        let item = item("matroska,webm", "h264", "aac");
+        let item = item("mkv", "matroska,webm", "h264", "aac");
         let caps = caps(&[], &["h264"], &["aac"], None, None, None, true);
         assert_eq!(decide_mode(&item, &caps), PlaybackMode::Remux);
     }
 
     #[test]
     fn decides_remux_for_unsupported_audio() {
-        let item = item("mov,mp4", "h264", "eac3");
+        let item = item("mp4", "mov,mp4", "h264", "eac3");
         let caps = caps(&["mp4"], &["h264"], &[], None, None, None, true);
         assert_eq!(decide_mode(&item, &caps), PlaybackMode::Remux);
     }
@@ -766,21 +828,21 @@ mod tests {
     #[test]
     fn decides_remux_when_hls_client_needs_non_hls_container() {
         // Client claims Matroska support but only plays HLS.
-        let item = item("matroska,webm", "h264", "aac");
+        let item = item("mkv", "matroska,webm", "h264", "aac");
         let caps = caps(&["matroska"], &["h264"], &["aac"], None, None, None, true);
         assert_eq!(decide_mode(&item, &caps), PlaybackMode::Remux);
     }
 
     #[test]
     fn decides_transcode_for_resolution() {
-        let item = item("mov,mp4", "h264", "aac");
+        let item = item("mp4", "mov,mp4", "h264", "aac");
         let caps = caps(&["mp4"], &["h264"], &["aac"], None, Some(480), None, true);
         assert_eq!(decide_mode(&item, &caps), PlaybackMode::Transcode);
     }
 
     #[test]
     fn decides_transcode_for_bitrate() {
-        let item = item("mov,mp4", "h264", "aac");
+        let item = item("mp4", "mov,mp4", "h264", "aac");
         let caps = caps(
             &["mp4"],
             &["h264"],
@@ -795,14 +857,14 @@ mod tests {
 
     #[test]
     fn decides_transcode_for_unsupported_video_codec() {
-        let item = item("mov,mp4", "hevc", "aac");
+        let item = item("mp4", "mov,mp4", "hevc", "aac");
         let caps = caps(&["mp4"], &["av1"], &["aac"], None, None, None, true);
         assert_eq!(decide_mode(&item, &caps), PlaybackMode::Transcode);
     }
 
     #[test]
     fn empty_capabilities_force_reencoding() {
-        let item = item("mov,mp4", "h264", "aac");
+        let item = item("mp4", "mov,mp4", "h264", "aac");
         let caps = caps(&[], &[], &[], None, None, None, false);
         assert_eq!(decide_mode(&item, &caps), PlaybackMode::Transcode);
     }
