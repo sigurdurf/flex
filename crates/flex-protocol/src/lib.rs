@@ -54,6 +54,21 @@ pub fn artwork_path(id: i64) -> String {
     format!("/api/{API_VERSION}/items/{id}/artwork")
 }
 
+/// URL to browse series (TV show groupings) rather than individual episodes.
+pub fn series_path() -> String {
+    format!("/api/{API_VERSION}/series")
+}
+
+/// URL for a single series with its seasons and episodes.
+pub fn series_item_path(id: i64) -> String {
+    format!("/api/{API_VERSION}/series/{id}")
+}
+
+/// URL for a series' artwork (`poster` or `backdrop`).
+pub fn series_artwork_path(id: i64) -> String {
+    format!("/api/{API_VERSION}/series/{id}/artwork")
+}
+
 /// URL listing a media item's subtitle tracks.
 pub fn subtitles_path(id: i64) -> String {
     format!("/api/{API_VERSION}/items/{id}/subtitles")
@@ -499,6 +514,58 @@ pub struct MediaItem {
     /// Present when artwork is available. Relative to the API root.
     pub poster_url: Option<String>,
     pub backdrop_url: Option<String>,
+    /// The series this episode belongs to. `None` for movies and ungrouped
+    /// items. Episodes in a TV library are grouped into a [`Series`] at scan
+    /// time so clients can browse shows rather than individual files.
+    #[serde(default)]
+    pub series_id: Option<i64>,
+    /// Season number, for episodes grouped into a series.
+    #[serde(default)]
+    pub season: Option<i32>,
+    /// Episode number, for episodes grouped into a series.
+    #[serde(default)]
+    pub episode: Option<i32>,
+}
+
+/// A TV series (show): a group of episodes spanning one or more seasons.
+///
+/// Series are derived at scan time from TV-library files (episode number and
+/// season are parsed from the file name and/or folder layout). They are a
+/// browsing convenience layered over [`MediaItem`]s; playback still targets the
+/// underlying episode items.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Series {
+    pub id: i64,
+    pub library_id: i64,
+    pub title: String,
+    /// Title normalised for sorting (articles stripped, lowercased server-side).
+    pub sort_title: String,
+    pub year: Option<i32>,
+    pub overview: Option<String>,
+    pub added_at: i64,
+    pub updated_at: i64,
+    /// Number of distinct seasons that contain at least one episode.
+    pub season_count: i64,
+    /// Total number of episodes across all seasons.
+    pub episode_count: i64,
+    /// Present when artwork is available. Relative to the API root.
+    pub poster_url: Option<String>,
+    pub backdrop_url: Option<String>,
+}
+
+/// One season of a [`Series`], with its episodes in ascending episode order.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Season {
+    pub season_number: i32,
+    pub episodes: Vec<MediaItem>,
+}
+
+/// A series together with its seasons and episodes, returned by
+/// `GET /api/v1/series/{id}`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SeriesDetail {
+    pub series: Series,
+    pub seasons: Vec<Season>,
 }
 
 /// A page of results returned by list endpoints.
@@ -534,6 +601,18 @@ pub struct ScanReport {
 pub struct ItemQuery {
     pub library_id: Option<i64>,
     pub kind: Option<MediaKind>,
+    /// Fuzzy title search.
+    pub q: Option<String>,
+    /// Sort key: `title`, `-title`, `year`, `-year`, `added`, `-added`.
+    pub sort: Option<String>,
+    pub limit: Option<i64>,
+    pub offset: Option<i64>,
+}
+
+/// Query parameters accepted by `GET /api/v1/series`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SeriesQuery {
+    pub library_id: Option<i64>,
     /// Fuzzy title search.
     pub q: Option<String>,
     /// Sort key: `title`, `-title`, `year`, `-year`, `added`, `-added`.

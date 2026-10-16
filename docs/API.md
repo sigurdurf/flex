@@ -207,6 +207,51 @@ Returns an array of `SubtitleStream`.
 Returns the extracted subtitle track as `text/vtt` (WebVTT). The server extracts
 embedded subtitles with `ffmpeg` on demand; external sidecar files are served directly.
 
+## Series
+
+TV shows are grouped server-side at scan time: episode number and season are
+parsed from the file name and/or folder layout (`S01E02`, `1x02`, `Season 2/…`,
+`Specials/…`, …), and each episode `MediaItem` is linked to a `Series`. Browsing
+a TV library returns series; playback still targets the underlying episode items.
+
+### `GET /api/v1/series`
+Browse indexed series. Query parameters (all optional):
+
+| param        | type   | notes                                                              |
+|--------------|--------|--------------------------------------------------------------------|
+| `library_id` | int    | Filter to one library.                                             |
+| `q`          | string | Case-insensitive title substring match.                            |
+| `sort`       | string | `title` \| `-title` \| `year` \| `-year` \| `added` \| `-added`.   |
+| `limit`      | int    | Default `50`, max `500`.                                            |
+| `offset`     | int    | Default `0`.                                                        |
+
+Returns `Page<Series>`.
+
+### `GET /api/v1/series/{id}`
+Returns a `SeriesDetail` `{ "series": Series, "seasons": [ { "season_number", "episodes": [MediaItem, …] } ] }`,
+with seasons and episodes in ascending order, or `404`.
+
+### `GET /api/v1/series/{id}/artwork?type=poster|backdrop`
+Returns image bytes if series artwork exists, otherwise `404`. `type` defaults to `poster`.
+
+## Series shape
+```json
+{
+  "id": 3,
+  "library_id": 2,
+  "title": "Severance",
+  "sort_title": "severance",
+  "year": 2022,
+  "overview": null,
+  "added_at": 1710000000,
+  "updated_at": 1710000000,
+  "season_count": 2,
+  "episode_count": 19,
+  "poster_url": "/api/v1/series/3/artwork?type=poster",
+  "backdrop_url": null
+}
+```
+
 ## MediaItem shape
 ```json
 {
@@ -227,6 +272,12 @@ embedded subtitles with `ffmpeg` on demand; external sidecar files are served di
   "added_at": 1710000000,
   "updated_at": 1710000000,
   "poster_url": "/api/v1/items/7/artwork?type=poster",
-  "backdrop_url": null
+  "backdrop_url": null,
+  "series_id": 3,
+  "season": 1,
+  "episode": 2
 }
 ```
+
+Items that are not episodes omit `series_id`, `season` and `episode` (or set
+them to `null`).

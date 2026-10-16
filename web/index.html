@@ -107,8 +107,23 @@
         </section>
       </div>
 
+      <section id="series-view" class="detail series-view" aria-labelledby="series-title" hidden>
+        <button id="series-back" class="back-button" type="button"><svg class="icon" aria-hidden="true"><use href="#icon-arrow"/></svg><span>Back to library</span></button>
+        <p id="series-loading" class="notice" role="status" hidden>Loading series...</p>
+        <div id="series-error" class="notice error-notice" role="alert" hidden><div><strong>Couldn't load this series</strong><p id="series-error-text"></p></div><button id="series-retry" class="secondary" type="button">Try again</button></div>
+        <div id="series-content" hidden>
+          <div class="detail-hero">
+            <div id="series-poster-wrap" class="detail-poster"></div>
+            <div class="detail-info">
+              <p class="eyebrow">Series</p><h1 id="series-title" tabindex="-1"></h1><p id="series-meta" class="muted"></p><p id="series-overview" class="detail-overview"></p>
+            </div>
+          </div>
+          <div id="series-seasons" class="series-seasons"></div>
+        </div>
+      </section>
+
       <section id="detail-view" class="detail" aria-labelledby="detail-title" hidden>
-        <button id="detail-back" class="back-button" type="button"><svg class="icon" aria-hidden="true"><use href="#icon-arrow"/></svg>Back to library</button>
+        <button id="detail-back" class="back-button" type="button"><svg class="icon" aria-hidden="true"><use href="#icon-arrow"/></svg><span id="detail-back-label">Back to library</span></button>
         <p id="detail-loading" class="notice" role="status" hidden>Loading media information...</p>
         <div id="detail-error" class="notice error-notice" role="alert" hidden><div><strong>Couldn't load this title</strong><p id="detail-error-text"></p></div><button id="detail-retry" class="secondary" type="button">Try again</button></div>
         <div id="detail-content" hidden>

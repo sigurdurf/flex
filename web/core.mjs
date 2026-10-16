@@ -38,6 +38,22 @@ export function formatRuntime(ms) {
   return minutes >= 60 ? `${Math.floor(minutes / 60)}h ${minutes % 60}m` : `${minutes}m`;
 }
 
+// Series are a browsing convenience over episodes; these helpers keep the
+// pluralisation of season/episode counts and episode labels in one place.
+export function seriesCounts(series) {
+  const seasons = Math.max(0, Number(series?.season_count) || 0);
+  const episodes = Math.max(0, Number(series?.episode_count) || 0);
+  return {
+    seasons: seasons === 1 ? "1 season" : `${seasons} seasons`,
+    episodes: episodes === 1 ? "1 episode" : `${episodes} episodes`
+  };
+}
+
+export function formatEpisodeNumber(number) {
+  const value = Math.max(0, Number(number) || 0);
+  return value > 0 ? "E" + String(value).padStart(2, "0") : "—";
+}
+
 export function progressPayload(playback, currentTime, duration, ended = false) {
   // Metadata and any initial seek must finish before a zero can overwrite a resume point.
   if (!playback?.ready || !Number.isFinite(currentTime) || currentTime < 0) return null;

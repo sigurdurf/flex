@@ -5,11 +5,13 @@ mod card;
 mod detail;
 mod login;
 pub mod player_page;
+mod series;
 
-pub use card::{build_card, build_continue_card, Card};
+pub use card::{build_card, build_continue_card, build_series_card, Card};
 pub use detail::build_detail_page;
 pub use login::LoginPage;
 pub use player_page::PlayerPage;
+pub use series::build_series_page;
 
 /// Format a duration given in milliseconds as `mm:ss`, or `h:mm:ss` when the
 /// value is an hour or longer. `None` renders as `--:--`.

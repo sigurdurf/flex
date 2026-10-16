@@ -3,8 +3,8 @@ import { once } from "node:events";
 import { createServer } from "node:http";
 import { after, before, test } from "node:test";
 import {
-  ApiClient, ArtworkCache, browserCapabilities, formatRuntime, formatTime,
-  normalizeServer, progressPayload, readStorage, writeStorage
+  ApiClient, ArtworkCache, browserCapabilities, formatEpisodeNumber, formatRuntime, formatTime,
+  normalizeServer, progressPayload, readStorage, seriesCounts, writeStorage
 } from "../core.mjs";
 
 let server;
@@ -215,4 +215,19 @@ test("formats resume times and runtime without hiding zero", () => {
   assert.equal(formatTime(3723000), "1:02:03");
   assert.equal(formatRuntime(5400000), "1h 30m");
   assert.equal(formatRuntime(null), "");
+});
+
+test("pluralizes season and episode counts for series cards", () => {
+  assert.deepEqual(seriesCounts({ season_count: 1, episode_count: 1 }), { seasons: "1 season", episodes: "1 episode" });
+  assert.deepEqual(seriesCounts({ season_count: 2, episode_count: 10 }), { seasons: "2 seasons", episodes: "10 episodes" });
+  assert.deepEqual(seriesCounts({}), { seasons: "0 seasons", episodes: "0 episodes" });
+  assert.deepEqual(seriesCounts(null), { seasons: "0 seasons", episodes: "0 episodes" });
+});
+
+test("labels episode numbers with zero-padding and a placeholder", () => {
+  assert.equal(formatEpisodeNumber(1), "E01");
+  assert.equal(formatEpisodeNumber(10), "E10");
+  assert.equal(formatEpisodeNumber(105), "E105");
+  assert.equal(formatEpisodeNumber(0), "—");
+  assert.equal(formatEpisodeNumber(null), "—");
 });

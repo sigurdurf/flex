@@ -934,6 +934,9 @@ mod tests {
             updated_at: 0,
             poster_url: None,
             backdrop_url: None,
+            series_id: None,
+            season: None,
+            episode: None,
         }
     }
 
@@ -1216,6 +1219,9 @@ mod tests {
             sidecars: Vec::new(),
             poster_path: None,
             backdrop_path: None,
+            series_id: None,
+            season: None,
+            episode: None,
         };
         db::upsert_media(&state.pool, &new_item).await.unwrap().0
     }

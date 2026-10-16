@@ -12,9 +12,10 @@ use anyhow::{Context, Result};
 use flex_protocol::{
     artwork_path, continue_watching_path, health_path, item_path, items_path, libraries_path,
     login_path, logout_path, me_path, playback_start_path, playback_stop_path, progress_item_path,
-    scan_path, ContinueWatchingEntry, Health, ItemQuery, Library, LoginRequest, LoginResponse,
-    MediaItem, MediaKind, Page, PlaybackSession, PlaybackStartRequest, ScanReport,
-    StopPlaybackRequest, UpdateProgressRequest, User, WatchState,
+    scan_path, series_artwork_path, series_item_path, series_path, ContinueWatchingEntry, Health,
+    ItemQuery, Library, LoginRequest, LoginResponse, MediaItem, MediaKind, Page, PlaybackSession,
+    PlaybackStartRequest, ScanReport, Series, SeriesDetail, SeriesQuery, StopPlaybackRequest,
+    UpdateProgressRequest, User, WatchState,
 };
 use gtk4::glib;
 
@@ -69,6 +70,27 @@ pub fn build_query(query: &ItemQuery) -> String {
     }
     if let Some(kind) = query.kind {
         push_param(&mut params, "kind", media_kind_str(kind));
+    }
+    if let Some(q) = query.q.as_deref().filter(|q| !q.is_empty()) {
+        push_param(&mut params, "q", q);
+    }
+    if let Some(sort) = query.sort.as_deref().filter(|s| !s.is_empty()) {
+        push_param(&mut params, "sort", sort);
+    }
+    if let Some(limit) = query.limit {
+        push_param(&mut params, "limit", limit);
+    }
+    if let Some(offset) = query.offset {
+        push_param(&mut params, "offset", offset);
+    }
+    params.join("&")
+}
+
+/// Serialise a [`SeriesQuery`] into a query string (without the leading `?`).
+pub fn build_series_query(query: &SeriesQuery) -> String {
+    let mut params = Vec::new();
+    if let Some(library_id) = query.library_id {
+        push_param(&mut params, "library_id", library_id);
     }
     if let Some(q) = query.q.as_deref().filter(|q| !q.is_empty()) {
         push_param(&mut params, "q", q);
@@ -185,6 +207,16 @@ impl ApiClient {
         format!("{}{}?type={}", self.base_url(), artwork_path(id), kind)
     }
 
+    /// Absolute URL for a series' artwork of the given type (`poster`/`backdrop`).
+    pub fn series_artwork_url(&self, id: i64, kind: &str) -> String {
+        format!(
+            "{}{}?type={}",
+            self.base_url(),
+            series_artwork_path(id),
+            kind
+        )
+    }
+
     pub async fn health(&self) -> Result<Health> {
         let resp = self
             .http
@@ -218,6 +250,48 @@ impl ApiClient {
             .await
             .context("request to /items failed")?;
         parse_json(resp, "/items").await
+    }
+
+    pub async fn series(&self, query: &SeriesQuery) -> Result<Page<Series>> {
+        let qs = build_series_query(query);
+        let path = series_path();
+        let url = if qs.is_empty() {
+            self.url(&path)
+        } else {
+            format!("{}{}?{}", self.base_url(), path, qs)
+        };
+        let resp = self
+            .add_auth(self.http.get(url))
+            .send()
+            .await
+            .context("request to /series failed")?;
+        parse_json(resp, "/series").await
+    }
+
+    pub async fn series_detail(&self, id: i64) -> Result<SeriesDetail> {
+        let resp = self
+            .add_auth(self.http.get(self.url(&series_item_path(id))))
+            .send()
+            .await
+            .with_context(|| format!("request to /series/{id} failed"))?;
+        parse_json(resp, "series").await
+    }
+
+    /// Fetch raw series artwork bytes, or `None` when there is none (404).
+    pub async fn series_artwork_bytes(&self, id: i64, kind: &str) -> Result<Option<Vec<u8>>> {
+        let resp = self
+            .add_auth(self.http.get(self.series_artwork_url(id, kind)))
+            .send()
+            .await
+            .with_context(|| format!("request for artwork of series {id} failed"))?;
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        let resp = resp
+            .error_for_status()
+            .with_context(|| format!("artwork request for series {id} returned an error"))?;
+        let bytes = resp.bytes().await.context("failed to read artwork bytes")?;
+        Ok(Some(bytes.to_vec()))
     }
 
     pub async fn item(&self, id: i64) -> Result<MediaItem> {
@@ -466,6 +540,22 @@ mod tests {
             ..ItemQuery::default()
         };
         assert_eq!(build_query(&query), "");
+    }
+
+    #[test]
+    fn series_query_has_no_kind_param() {
+        let query = SeriesQuery {
+            library_id: Some(4),
+            q: Some("the office".into()),
+            sort: Some("-year".into()),
+            limit: Some(50),
+            offset: Some(0),
+        };
+        assert_eq!(
+            build_series_query(&query),
+            "library_id=4&q=the+office&sort=-year&limit=50&offset=0"
+        );
+        assert_eq!(build_series_query(&SeriesQuery::default()), "");
     }
 
     #[test]

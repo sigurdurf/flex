@@ -1,7 +1,7 @@
 //! Mapping between SQLite rows and `flex-protocol` types.
 
 use flex_protocol::{
-    AudioStream, Device, MediaItem, MediaKind, SubtitleStream, User, UserRole, VideoStream,
+    AudioStream, Device, MediaItem, MediaKind, Series, SubtitleStream, User, UserRole, VideoStream,
     WatchState,
 };
 use serde::{Deserialize, Serialize};
@@ -151,6 +151,24 @@ pub struct NewMediaItem {
     pub sidecars: Vec<SidecarTrack>,
     pub poster_path: Option<String>,
     pub backdrop_path: Option<String>,
+    /// Series this item belongs to (episodes only).
+    pub series_id: Option<i64>,
+    /// Season number (episodes only).
+    pub season: Option<i32>,
+    /// Episode number (episodes only).
+    pub episode: Option<i32>,
+}
+
+/// All fields required to insert/update a series row.
+#[derive(Debug, Clone)]
+pub struct NewSeries {
+    pub library_id: i64,
+    pub title: String,
+    pub sort_title: String,
+    pub year: Option<i32>,
+    pub overview: Option<String>,
+    pub poster_path: Option<String>,
+    pub backdrop_path: Option<String>,
 }
 
 /// Decode a `media_items` row into a [`MediaItem`].
@@ -197,6 +215,36 @@ pub fn row_to_media_item(row: &SqliteRow) -> Result<MediaItem, sqlx::Error> {
         updated_at: row.try_get("updated_at")?,
         poster_url: poster_path.map(|_| flex_protocol::artwork_path(id) + "?type=poster"),
         backdrop_url: backdrop_path.map(|_| flex_protocol::artwork_path(id) + "?type=backdrop"),
+        series_id: row.try_get("series_id")?,
+        season: row.try_get("season")?,
+        episode: row.try_get("episode")?,
+    })
+}
+
+/// Decode a `series` row (optionally joined with computed counts) into a
+/// [`Series`]. `prefix` is prepended to every column name so the same mapper can
+/// read from an aliased join.
+///
+/// The query must supply `season_count` and `episode_count` columns.
+pub fn row_to_series(row: &SqliteRow, prefix: &str) -> Result<Series, sqlx::Error> {
+    let col = |name: &str| format!("{prefix}{name}");
+    let id: i64 = row.try_get(col("id").as_str())?;
+    let poster_path: Option<String> = row.try_get(col("poster_path").as_str())?;
+    let backdrop_path: Option<String> = row.try_get(col("backdrop_path").as_str())?;
+    Ok(Series {
+        id,
+        library_id: row.try_get(col("library_id").as_str())?,
+        title: row.try_get(col("title").as_str())?,
+        sort_title: row.try_get(col("sort_title").as_str())?,
+        year: row.try_get(col("year").as_str())?,
+        overview: row.try_get(col("overview").as_str())?,
+        added_at: row.try_get(col("added_at").as_str())?,
+        updated_at: row.try_get(col("updated_at").as_str())?,
+        season_count: row.try_get(col("season_count").as_str())?,
+        episode_count: row.try_get(col("episode_count").as_str())?,
+        poster_url: poster_path.map(|_| flex_protocol::series_artwork_path(id) + "?type=poster"),
+        backdrop_url: backdrop_path
+            .map(|_| flex_protocol::series_artwork_path(id) + "?type=backdrop"),
     })
 }
 

@@ -1,6 +1,6 @@
 import {
-  ApiClient, ArtworkCache, browserCapabilities, formatRuntime, formatTime,
-  normalizeServer, progressPayload, readStorage, writeStorage
+  ApiClient, ArtworkCache, browserCapabilities, formatEpisodeNumber, formatRuntime, formatTime,
+  normalizeServer, progressPayload, readStorage, seriesCounts, writeStorage
 } from "./core.mjs";
 
 const $ = id => document.getElementById(id);
@@ -12,6 +12,7 @@ const state = {
   scanning: false,
   continueEntries: [], continueLoaded: false, continueError: null,
   detailId: null, currentItem: null, progress: null,
+  browseMode: "items", seriesId: null, seriesDetail: null, seriesLoaded: false, seriesError: null,
   requests: new Map(), cleanups: new Set(), player: null, playbackAttempt: 0, authBusy: false
 };
 let searchTimer;
@@ -71,6 +72,15 @@ function titleCount(count) { return `${count.toLocaleString()} ${count === 1 ? "
 function kindLabel(kind) { return { movie: "Movie", episode: "Episode", other: "Video" }[kind] || "Video"; }
 function mediaIcon(kind) { return kind === "episode" || kind === "tv" ? "tv" : kind === "movie" || kind === "movies" ? "film" : "folder"; }
 function validItem(item) { return item && Number.isSafeInteger(item.id) && typeof item.title === "string"; }
+function validSeries(series) { return series && Number.isSafeInteger(series.id) && typeof series.title === "string"; }
+
+// TV libraries browse shows rather than individual episode files.
+function activeLibrary() { return state.libraries.find(lib => lib.id === state.libraryId) || null; }
+function browseModeOf() { const lib = activeLibrary(); return lib && lib.kind === "tv" ? "series" : "items"; }
+function countLabel(count) {
+  const noun = state.browseMode === "series" ? "series" : count === 1 ? "title" : "titles";
+  return `${count.toLocaleString()} ${noun}`;
+}
 
 // Fetch artwork only as it approaches the viewport. The cache shares requests
 // between cards and details, and releases every object URL at session end.
@@ -129,13 +139,17 @@ function resetSession() {
   Object.assign(state, {
     user: null, libraries: [], librariesLoaded: false, items: [], total: 0, offset: 0,
     browseLoaded: false, browseError: null, loading: false, scanning: false, continueEntries: [],
-    continueLoaded: false, continueError: null, detailId: null, currentItem: null, progress: null
+    continueLoaded: false, continueError: null, detailId: null, currentItem: null, progress: null,
+    browseMode: "items", seriesId: null, seriesDetail: null, seriesLoaded: false, seriesError: null
   });
   forgetPosters($("grid"));
   forgetPosters($("continue-row"));
   forgetPosters($("detail-poster-wrap"));
+  forgetPosters($("series-poster-wrap"));
   $("detail-content").hidden = true;
   $("detail-view").hidden = true;
+  $("series-content").hidden = true;
+  $("series-view").hidden = true;
   $("library-view").hidden = false;
   $("continue-section").hidden = true;
   $("toast").hidden = true;
@@ -187,6 +201,7 @@ function showApp(user) {
   reloadItems();
   loadContinueWatching();
   if (state.detailId != null) loadDetail(state.detailId);
+  else if (state.seriesId != null) loadSeries(state.seriesId);
 }
 
 async function login(event) {
@@ -245,17 +260,21 @@ async function logout() {
   }
 }
 
-function routeHash(itemId = state.detailId) {
+function routeHash() {
   const params = new URLSearchParams();
   if (state.libraryId != null) params.set("library", state.libraryId);
   if (state.query) params.set("q", state.query);
   if (state.sort !== "title") params.set("sort", state.sort);
-  if (itemId != null) params.set("item", itemId);
+  if (state.seriesId != null) params.set("series", state.seriesId);
+  if (state.detailId != null) params.set("item", state.detailId);
   return params.size ? "#" + params : location.pathname + location.search;
 }
 
-function writeRoute(replace = false, itemId = state.detailId) {
-  history[replace ? "replaceState" : "pushState"]({ flexItem: itemId }, "", routeHash(itemId));
+function writeRoute(replace = false) {
+  history[replace ? "replaceState" : "pushState"]({
+    flexItem: state.detailId,
+    flexSeries: state.seriesId
+  }, "", routeHash());
   lastHistoryURL = location.href;
 }
 
@@ -266,6 +285,7 @@ function readRoute() {
   state.query = params.get("q") || "";
   state.sort = SORTS.includes(params.get("sort")) ? params.get("sort") : "title";
   state.detailId = id(params.get("item"));
+  state.seriesId = id(params.get("series"));
   $("search-input").value = state.query;
   $("search-clear").hidden = !state.query;
   $("sort-select").value = state.sort;
@@ -280,13 +300,17 @@ function onHistory() {
   clearTimeout(searchTimer);
   const previous = browseKey();
   const previousDetail = state.detailId;
+  const previousSeries = state.seriesId;
   readRoute();
   renderLibraries();
   renderHeading();
   renderContinue();
   if (previous !== browseKey()) reloadItems();
   if (state.detailId != null) loadDetail(state.detailId);
-  else if (previousDetail != null) showBrowse();
+  else if (state.seriesId != null) {
+    if (previousSeries !== state.seriesId) loadSeries(state.seriesId);
+    else showSeriesView();
+  } else if (previousDetail != null || previousSeries != null) showBrowse();
 }
 
 function selectLibrary(id) {
@@ -325,6 +349,9 @@ async function loadLibraries() {
     state.librariesLoaded = true;
     renderLibraries();
     renderHeading();
+    // A deep link into a TV library is fetched before libraries load, so the
+    // browse mode can change from items to series once the kind is known.
+    if (state.detailId == null && state.seriesId == null && browseModeOf() !== state.browseMode) reloadItems();
   } catch (error) {
     if (!current(client, controller) || ignoreError(error)) return;
     $("libraries-error-text").textContent = "Couldn't load libraries. " + error.message;
@@ -349,11 +376,12 @@ function renderLibraries() {
 }
 
 function renderHeading() {
-  const lib = state.libraries.find(lib => lib.id === state.libraryId);
+  const lib = activeLibrary();
   $("browse-heading").textContent = state.libraryId == null ? "All media" : lib?.name || "Library";
+  const isSeries = browseModeOf() === "series";
   $("library-description").textContent = state.libraryId == null ? "Movies, episodes, and videos on your server." : `${lib ? lib.name + " on" : "Media from"} your server.`;
-  $("view-label").textContent = state.query ? "Search results" : "All titles";
-  document.title = state.detailId != null ? document.title : $("browse-heading").textContent + " | Flex";
+  $("view-label").textContent = state.query ? "Search results" : isSeries ? "All shows" : "All titles";
+  document.title = (state.detailId != null || state.seriesId != null) ? document.title : $("browse-heading").textContent + " | Flex";
 }
 
 function setView(view) {
@@ -379,6 +407,7 @@ function renderSkeletons() {
 function mediaCard(item) {
   const card = button("media-card", "", () => openDetail(item.id));
   card.dataset.itemId = item.id;
+  card.dataset.browseId = item.id;
   card.setAttribute("aria-label", `${item.title || "Untitled"}${item.year ? ", " + item.year : ""}. View details`);
   const poster = makePoster(item);
   const hover = element("span", "poster-hover");
@@ -391,26 +420,46 @@ function mediaCard(item) {
   return card;
 }
 
+function seriesCard(series) {
+  const card = button("media-card", "", () => openSeries(series.id));
+  card.dataset.seriesId = series.id;
+  card.dataset.browseId = series.id;
+  const { seasons, episodes } = seriesCounts(series);
+  card.setAttribute("aria-label", `${series.title || "Untitled"}${series.year ? ", " + series.year : ""}. ${seasons}, ${episodes}. View series`);
+  const poster = makePoster({ ...series, kind: "tv" });
+  const hover = element("span", "poster-hover");
+  hover.append(icon("info"));
+  poster.append(hover);
+  const body = element("span", "card-body");
+  const meta = [series.year, seasons].filter(Boolean).join(" · ");
+  body.append(element("span", "card-title", series.title || "Untitled"), element("span", "card-meta", meta || episodes));
+  card.append(poster, body, element("span", "card-kind", episodes));
+  return card;
+}
+
 function renderBrowseStatus() {
   $("grid").setAttribute("aria-busy", String(state.loading));
-  $("results-count").textContent = state.loading && state.browseAction === "refresh" ? "Refreshing titles..." : state.loading && !state.browseLoaded ? "Loading titles..." : state.browseLoaded ? titleCount(state.total) + (state.query ? ` matching "${state.query}"` : "") : "";
-  $("loaded-count").textContent = state.browseLoaded && state.total > 0 ? `${state.items.length.toLocaleString()} of ${titleCount(state.total)} shown` : "";
+  const isSeries = state.browseMode === "series";
+  const noun = isSeries ? "shows" : "titles";
+  $("results-count").textContent = state.loading && state.browseAction === "refresh" ? `Refreshing ${noun}...` : state.loading && !state.browseLoaded ? `Loading ${noun}...` : state.browseLoaded ? countLabel(state.total) + (state.query ? ` matching "${state.query}"` : "") : "";
+  $("loaded-count").textContent = state.browseLoaded && state.total > 0 ? `${state.items.length.toLocaleString()} of ${countLabel(state.total)} shown` : "";
   $("load-more").hidden = !state.browseLoaded || state.offset >= state.total;
   $("load-more").disabled = state.loading;
   $("load-more").textContent = state.loading ? "Loading..." : "Load more";
   $("browse-error").hidden = !state.browseError;
-  $("browse-error-title").textContent = state.browseAction === "more" ? "Couldn't load more titles" : state.browseAction === "refresh" ? "Couldn't refresh this library" : "Couldn't load your media";
+  $("browse-error-title").textContent = state.browseAction === "more" ? `Couldn't load more ${noun}` : state.browseAction === "refresh" ? "Couldn't refresh this library" : "Couldn't load your media";
   $("browse-error-text").textContent = state.browseError ? state.browseError.message + (state.browseAction === "refresh" ? " Previously loaded titles are shown below." : "") : "";
   const empty = state.browseLoaded && !state.loading && !state.browseError && !state.items.length;
   $("browse-empty").hidden = !empty;
-  $("empty-title").textContent = state.query ? "No matching titles" : "No media yet";
-  $("empty-description").textContent = state.query ? "Try a different title or clear your search to browse this library." : "Scan media to index files in your configured libraries.";
+  $("empty-title").textContent = state.query ? `No matching ${isSeries ? "shows" : "titles"}` : isSeries ? "No shows yet" : "No media yet";
+  $("empty-description").textContent = state.query ? "Try a different title or clear your search to browse this library." : isSeries ? "Scan media to index episodes and group them into shows." : "Scan media to index files in your configured libraries.";
   $("empty-clear").hidden = !state.query;
 }
 
 async function reloadItems(preserve = false) {
   const client = state.client;
   if (!client) return;
+  state.browseMode = browseModeOf();
   const controller = beginRequest("browse");
   preserve = preserve === true && state.browseLoaded;
   if (!preserve) Object.assign(state, { items: [], offset: 0, total: 0, browseLoaded: false });
@@ -436,10 +485,14 @@ async function fetchItems(client, controller, append) {
   const params = new URLSearchParams({ limit: state.limit, offset, sort: state.sort });
   if (state.libraryId != null) params.set("library_id", state.libraryId);
   if (state.query) params.set("q", state.query);
+  const mode = state.browseMode || browseModeOf();
+  const endpoint = mode === "series" ? "/series?" : "/items?";
+  const validator = mode === "series" ? validSeries : validItem;
+  const cardFn = mode === "series" ? seriesCard : mediaCard;
   try {
-    const page = await client.request("/items?" + params, { signal: controller.signal });
+    const page = await client.request(endpoint + params, { signal: controller.signal });
     if (!current(client, controller)) return;
-    if (!Array.isArray(page?.items) || page.items.some(item => !validItem(item)) || !Number.isFinite(page.total) || page.total < 0) throw new Error("The server returned an unreadable media list.");
+    if (!Array.isArray(page?.items) || page.items.some(item => !validator(item)) || !Number.isFinite(page.total) || page.total < 0) throw new Error("The server returned an unreadable media list.");
     if (!append) {
       forgetPosters($("grid"));
       state.items = [];
@@ -453,10 +506,10 @@ async function fetchItems(client, controller, append) {
     if (!page.items.length) state.offset = Math.max(state.offset, state.total);
     state.browseLoaded = true;
     const fragment = document.createDocumentFragment();
-    additions.forEach(item => fragment.append(mediaCard(item)));
+    additions.forEach(item => fragment.append(cardFn(item)));
     $("grid").append(fragment);
     if (append && state.offset >= state.total && document.activeElement === $("load-more")) {
-      const firstAdded = additions.length ? $("grid").querySelector(`[data-item-id="${additions[0].id}"]`) : $("grid").lastElementChild;
+      const firstAdded = additions.length ? $("grid").querySelector(`[data-browse-id="${additions[0].id}"]`) : $("grid").lastElementChild;
       (firstAdded || $("main-content")).focus();
     }
   } catch (error) {
@@ -522,8 +575,18 @@ function renderContinue() {
   }
 }
 
+function openSeries(id) {
+  if (state.detailId == null && state.seriesId == null) {
+    browseScroll = window.scrollY;
+    browseFocus = id;
+  }
+  state.seriesId = id;
+  writeRoute();
+  loadSeries(id);
+}
+
 function openDetail(id) {
-  if (state.detailId == null) {
+  if (state.detailId == null && state.seriesId == null) {
     browseScroll = window.scrollY;
     browseFocus = id;
   }
@@ -533,25 +596,110 @@ function openDetail(id) {
 }
 
 function showBrowse(restore = true) {
-  for (const key of ["detail", "progress", "subtitles"]) state.requests.get(key)?.abort();
+  for (const key of ["detail", "progress", "subtitles", "series"]) state.requests.get(key)?.abort();
   state.detailId = null;
   state.currentItem = null;
   state.progress = null;
+  state.seriesId = null;
+  state.seriesDetail = null;
   $("detail-view").hidden = true;
+  $("series-view").hidden = true;
   $("library-view").hidden = false;
   renderHeading();
   if (restore) requestAnimationFrame(() => {
     window.scrollTo(0, browseScroll);
-    const card = $("grid").querySelector(`[data-item-id="${Number(browseFocus)}"]`);
+    const focus = browseFocus;
+    const selector = focus != null ? `[data-browse-id="${Number(focus)}"]` : null;
+    const card = selector ? $("grid").querySelector(selector) : null;
     (card || $("main-content")).focus({ preventScroll: true });
   });
 }
 
-function backToLibrary() {
-  if (history.state?.flexItem === state.detailId) history.back();
-  else {
+function backFromDetail() {
+  if (history.state?.flexItem === state.detailId) { history.back(); return; }
+  if (state.seriesId != null) {
+    state.detailId = null;
+    writeRoute(true);
+    showSeriesView();
+  } else {
     showBrowse();
-    writeRoute(true, null);
+    writeRoute(true);
+  }
+}
+function seriesBack() {
+  if (history.state?.flexSeries === state.seriesId && history.state?.flexItem == null) { history.back(); return; }
+  state.seriesId = null;
+  showBrowse();
+  writeRoute(true);
+}
+function showSeriesView() {
+  $("library-view").hidden = true;
+  $("detail-view").hidden = true;
+  $("series-view").hidden = false;
+}
+
+async function loadSeries(id) {
+  const client = state.client;
+  if (!client) return;
+  const controller = beginRequest("series");
+  state.seriesId = id;
+  state.seriesDetail = null;
+  state.seriesLoaded = false;
+  state.seriesError = null;
+  showSeriesView();
+  $("series-loading").hidden = false;
+  $("series-error").hidden = true;
+  $("series-content").hidden = true;
+  $("series-title").textContent = "Series";
+  window.scrollTo(0, 0);
+  try {
+    const detail = await client.request("/series/" + id, { signal: controller.signal });
+    if (!current(client, controller) || state.seriesId !== id) return;
+    if (!validSeries(detail?.series) || !Array.isArray(detail.seasons)) throw new Error("The server returned incomplete series information.");
+    state.seriesDetail = detail;
+    state.seriesLoaded = true;
+    renderSeries(detail);
+    $("series-loading").hidden = true;
+    $("series-content").hidden = false;
+    $("series-title").focus({ preventScroll: true });
+  } catch (error) {
+    if (!current(client, controller) || ignoreError(error)) return;
+    $("series-loading").hidden = true;
+    $("series-error-text").textContent = error.message;
+    $("series-error").hidden = false;
+    $("series-retry").focus({ preventScroll: true });
+  }
+}
+
+function renderSeries(detail) {
+  const series = detail.series;
+  document.title = series.title + " | Flex";
+  $("series-title").textContent = series.title;
+  const counts = seriesCounts({ season_count: series.season_count || detail.seasons.length, episode_count: series.episode_count });
+  $("series-meta").textContent = [series.year, counts.seasons, counts.episodes].filter(Boolean).join(" · ");
+  $("series-overview").textContent = series.overview || "No description available for this series.";
+  forgetPosters($("series-poster-wrap"));
+  $("series-poster-wrap").append(makePoster({ ...series, kind: "tv" }, true));
+  const container = $("series-seasons");
+  container.replaceChildren();
+  for (const season of detail.seasons) {
+    const section = element("section", "season");
+    section.append(element("h2", "season-heading", season.season_number > 0 ? `Season ${season.season_number}` : "Specials"));
+    const list = element("ul", "episode-list");
+    const episodesInOrder = [...season.episodes].sort((a, b) => (a.episode || 0) - (b.episode || 0));
+    for (const episode of episodesInOrder) {
+      const item = element("li");
+      const entry = button("episode-button", "", () => openDetail(episode.id));
+      entry.append(
+        element("span", "episode-number", formatEpisodeNumber(episode.episode)),
+        element("span", "episode-title", episode.title || "Untitled"),
+        element("span", "episode-meta", formatRuntime(episode.duration_ms))
+      );
+      item.append(entry);
+      list.append(item);
+    }
+    section.append(list);
+    container.append(section);
   }
 }
 
@@ -564,7 +712,9 @@ async function loadDetail(id) {
   state.currentItem = null;
   state.progress = null;
   $("library-view").hidden = true;
+  $("series-view").hidden = true;
   $("detail-view").hidden = false;
+  $("detail-back-label").textContent = state.seriesId != null ? "Back to series" : "Back to library";
   $("detail-loading").hidden = false;
   $("detail-error").hidden = true;
   $("detail-content").hidden = true;
@@ -979,8 +1129,10 @@ function bindEvents() {
     renderContinue();
     reloadItems();
   });
-  $("detail-back").addEventListener("click", backToLibrary);
+  $("detail-back").addEventListener("click", backFromDetail);
   $("detail-retry").addEventListener("click", () => loadDetail(state.detailId));
+  $("series-back").addEventListener("click", seriesBack);
+  $("series-retry").addEventListener("click", () => loadSeries(state.seriesId));
   $("progress-retry").addEventListener("click", () => loadProgress(state.detailId));
   $("detail-play").addEventListener("click", () => startPlayback(state.currentItem, 0));
   $("detail-resume").addEventListener("click", () => startPlayback(state.currentItem, state.progress?.position_ms || 0));

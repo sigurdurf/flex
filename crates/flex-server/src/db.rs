@@ -5,14 +5,15 @@ use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use flex_protocol::{
-    ContinueWatchingEntry, Device, ItemQuery, Library, MediaItem, Page, User, UserRole, WatchState,
+    ContinueWatchingEntry, Device, ItemQuery, Library, MediaItem, Page, Season, Series,
+    SeriesDetail, SeriesQuery, User, UserRole, WatchState,
 };
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions};
 use sqlx::{QueryBuilder, Row, Sqlite};
 
 use crate::model::{
-    library_kind_str, row_to_device, row_to_media_item, row_to_user, row_to_watch_state,
-    NewMediaItem, SidecarTrack,
+    library_kind_str, row_to_device, row_to_media_item, row_to_series, row_to_user,
+    row_to_watch_state, NewMediaItem, NewSeries, SidecarTrack,
 };
 
 /// Ordered list of schema migrations applied on startup (idempotent).
@@ -20,6 +21,24 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0001_init.sql"),
     include_str!("../migrations/0002_auth.sql"),
     include_str!("../migrations/0003_progress.sql"),
+    include_str!("../migrations/0004_series.sql"),
+];
+
+/// Columns added to `media_items` by the series feature.
+///
+/// `ALTER TABLE ... ADD COLUMN` cannot be expressed idempotently in the
+/// migration script (it errors on a second run), so the server adds any missing
+/// column here after the scripts run.
+const SERIES_COLUMNS: &[(&str, &str)] = &[
+    (
+        "series_id",
+        "ALTER TABLE media_items ADD COLUMN series_id INTEGER REFERENCES series (id) ON DELETE SET NULL",
+    ),
+    ("season", "ALTER TABLE media_items ADD COLUMN season INTEGER"),
+    (
+        "episode",
+        "ALTER TABLE media_items ADD COLUMN episode INTEGER",
+    ),
 ];
 
 /// Current Unix time in seconds.
@@ -30,7 +49,8 @@ pub fn now_secs() -> i64 {
         .unwrap_or(0)
 }
 
-/// Apply every [`MIGRATIONS`] script in order.
+/// Apply every [`MIGRATIONS`] script in order, then add any columns that must
+/// be introduced with a non-idempotent `ALTER TABLE`.
 async fn apply_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
     for sql in MIGRATIONS {
         sqlx::raw_sql(sql)
@@ -38,6 +58,31 @@ async fn apply_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
             .await
             .map_err(|e| anyhow::anyhow!("database migration failed: {e}"))?;
     }
+    ensure_series_columns(pool).await?;
+    Ok(())
+}
+
+/// Add the series columns to `media_items` if they are not present yet.
+async fn ensure_series_columns(pool: &SqlitePool) -> anyhow::Result<()> {
+    for (column, ddl) in SERIES_COLUMNS {
+        let exists: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM pragma_table_info('media_items') WHERE name = ?",
+        )
+        .bind(column)
+        .fetch_one(pool)
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to inspect media_items schema: {e}"))?;
+        if exists == 0 {
+            sqlx::raw_sql(ddl)
+                .execute(pool)
+                .await
+                .map_err(|e| anyhow::anyhow!("failed to add media_items.{column}: {e}"))?;
+        }
+    }
+    sqlx::raw_sql("CREATE INDEX IF NOT EXISTS idx_media_items_series ON media_items (series_id)")
+        .execute(pool)
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to index media_items.series_id: {e}"))?;
     Ok(())
 }
 
@@ -342,7 +387,7 @@ pub async fn upsert_media(
             "UPDATE media_items SET library_id = ?, kind = ?, title = ?, sort_title = ?, year = ?, \
              overview = ?, file_size = ?, container = ?, duration_ms = ?, video_json = ?, \
              audio_json = ?, subs_json = ?, sidecars_json = ?, poster_path = ?, backdrop_path = ?, \
-             updated_at = ? WHERE id = ?",
+             series_id = ?, season = ?, episode = ?, updated_at = ? WHERE id = ?",
         )
         .bind(item.library_id)
         .bind(kind)
@@ -359,6 +404,9 @@ pub async fn upsert_media(
         .bind(&sidecars_json)
         .bind(&item.poster_path)
         .bind(&item.backdrop_path)
+        .bind(item.series_id)
+        .bind(item.season)
+        .bind(item.episode)
         .bind(now)
         .bind(id)
         .execute(pool)
@@ -368,8 +416,9 @@ pub async fn upsert_media(
         let result = sqlx::query(
             "INSERT INTO media_items (library_id, kind, title, sort_title, year, overview, \
              file_path, file_size, container, duration_ms, video_json, audio_json, subs_json, \
-             sidecars_json, poster_path, backdrop_path, added_at, updated_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             sidecars_json, poster_path, backdrop_path, series_id, season, episode, added_at, \
+             updated_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(item.library_id)
         .bind(kind)
@@ -387,6 +436,9 @@ pub async fn upsert_media(
         .bind(&sidecars_json)
         .bind(&item.poster_path)
         .bind(&item.backdrop_path)
+        .bind(item.series_id)
+        .bind(item.season)
+        .bind(item.episode)
         .bind(now)
         .bind(now)
         .execute(pool)
@@ -514,6 +566,212 @@ pub async fn list_items(
         limit,
         offset,
     })
+}
+
+// --- Series ------------------------------------------------------------------
+
+/// `SELECT` list for a series row plus its computed season/episode counts.
+macro_rules! series_select {
+    () => {
+        "SELECT s.*, \
+         (SELECT COUNT(DISTINCT season) FROM media_items m WHERE m.series_id = s.id) AS season_count, \
+         (SELECT COUNT(*) FROM media_items m WHERE m.series_id = s.id) AS episode_count \
+         FROM series s"
+    };
+}
+
+/// Insert a new series or update the existing one with the same
+/// `(library_id, sort_title)`.
+///
+/// Returns `(id, added)` where `added` is `true` for a new row. Existing
+/// metadata (year, overview, artwork) is preserved when the incoming value is
+/// `None`, so re-scans do not wipe artwork that could not be re-discovered.
+pub async fn upsert_series(
+    pool: &SqlitePool,
+    series: &NewSeries,
+) -> Result<(i64, bool), sqlx::Error> {
+    let now = now_secs();
+    let existing: Option<i64> =
+        sqlx::query_scalar("SELECT id FROM series WHERE library_id = ? AND sort_title = ?")
+            .bind(series.library_id)
+            .bind(&series.sort_title)
+            .fetch_optional(pool)
+            .await?;
+
+    if let Some(id) = existing {
+        sqlx::query(
+            "UPDATE series SET title = ?, year = COALESCE(?, year), \
+             overview = COALESCE(?, overview), poster_path = COALESCE(?, poster_path), \
+             backdrop_path = COALESCE(?, backdrop_path), updated_at = ? WHERE id = ?",
+        )
+        .bind(&series.title)
+        .bind(series.year)
+        .bind(&series.overview)
+        .bind(&series.poster_path)
+        .bind(&series.backdrop_path)
+        .bind(now)
+        .bind(id)
+        .execute(pool)
+        .await?;
+        Ok((id, false))
+    } else {
+        let result = sqlx::query(
+            "INSERT INTO series (library_id, title, sort_title, year, overview, poster_path, \
+             backdrop_path, added_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(series.library_id)
+        .bind(&series.title)
+        .bind(&series.sort_title)
+        .bind(series.year)
+        .bind(&series.overview)
+        .bind(&series.poster_path)
+        .bind(&series.backdrop_path)
+        .bind(now)
+        .bind(now)
+        .execute(pool)
+        .await?;
+        Ok((result.last_insert_rowid(), true))
+    }
+}
+
+/// Fetch a single series by id.
+pub async fn get_series(pool: &SqlitePool, id: i64) -> Result<Option<Series>, sqlx::Error> {
+    let sql = format!("{} WHERE s.id = ?", series_select!());
+    let row = sqlx::query(&sql).bind(id).fetch_optional(pool).await?;
+    row.as_ref().map(|r| row_to_series(r, "")).transpose()
+}
+
+/// Fetch the on-disk artwork paths for a series.
+pub async fn get_series_artwork_paths(
+    pool: &SqlitePool,
+    id: i64,
+) -> Result<Option<(Option<String>, Option<String>)>, sqlx::Error> {
+    let row = sqlx::query("SELECT poster_path, backdrop_path FROM series WHERE id = ?")
+        .bind(id)
+        .fetch_optional(pool)
+        .await?;
+    Ok(row.map(|r| (r.get("poster_path"), r.get("backdrop_path"))))
+}
+
+/// Query series with filtering, sorting and pagination.
+pub async fn list_series(
+    pool: &SqlitePool,
+    query: &SeriesQuery,
+) -> Result<Page<Series>, sqlx::Error> {
+    let limit = query.limit.unwrap_or(50).clamp(0, 500);
+    let offset = query.offset.unwrap_or(0).max(0);
+    let search = query
+        .q
+        .as_ref()
+        .map(|q| q.trim())
+        .filter(|q| !q.is_empty())
+        .map(|q| format!("%{}%", q.to_ascii_lowercase()));
+
+    // The `s` alias must match `push_series_filters`, which qualifies columns as
+    // `s.library_id` / `s.title`.
+    let mut count_qb = QueryBuilder::<Sqlite>::new("SELECT COUNT(*) FROM series s");
+    push_series_filters(&mut count_qb, query.library_id, search.as_deref());
+    let total: i64 = count_qb.build_query_scalar().fetch_one(pool).await?;
+
+    let mut qb = QueryBuilder::<Sqlite>::new(series_select!());
+    push_series_filters(&mut qb, query.library_id, search.as_deref());
+    qb.push(" ORDER BY ")
+        .push(order_clause(query.sort.as_deref()));
+    qb.push(" LIMIT ")
+        .push_bind(limit)
+        .push(" OFFSET ")
+        .push_bind(offset);
+
+    let rows = qb.build().fetch_all(pool).await?;
+    let items = rows
+        .iter()
+        .map(|r| row_to_series(r, ""))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(Page {
+        items,
+        total,
+        limit,
+        offset,
+    })
+}
+
+/// Append `WHERE`/`AND` filters for a series query. Column references use the
+/// `s.` alias, so this must be applied to a query selecting from `series s`.
+fn push_series_filters<'a>(
+    qb: &mut QueryBuilder<'a, Sqlite>,
+    library_id: Option<i64>,
+    search: Option<&str>,
+) {
+    let mut first = true;
+    let mut and = |qb: &mut QueryBuilder<'a, Sqlite>| {
+        if first {
+            qb.push(" WHERE ");
+            first = false;
+        } else {
+            qb.push(" AND ");
+        }
+    };
+    if let Some(library_id) = library_id {
+        and(qb);
+        qb.push("s.library_id = ").push_bind(library_id);
+    }
+    if let Some(search) = search {
+        and(qb);
+        qb.push("LOWER(s.title) LIKE ")
+            .push_bind(search.to_string());
+    }
+}
+
+/// Fetch a series with its seasons and episodes in browsing order.
+pub async fn get_series_detail(
+    pool: &SqlitePool,
+    id: i64,
+) -> Result<Option<SeriesDetail>, sqlx::Error> {
+    let Some(series) = get_series(pool, id).await? else {
+        return Ok(None);
+    };
+
+    let rows = sqlx::query(
+        "SELECT * FROM media_items WHERE series_id = ? \
+         ORDER BY season ASC, episode ASC, title ASC, id ASC",
+    )
+    .bind(id)
+    .fetch_all(pool)
+    .await?;
+    let episodes = rows
+        .iter()
+        .map(row_to_media_item)
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let mut seasons: Vec<Season> = Vec::new();
+    for episode in episodes {
+        let number = episode.season.unwrap_or(0);
+        match seasons.last_mut() {
+            Some(season) if season.season_number == number => season.episodes.push(episode),
+            _ => seasons.push(Season {
+                season_number: number,
+                episodes: vec![episode],
+            }),
+        }
+    }
+
+    Ok(Some(SeriesDetail { series, seasons }))
+}
+
+/// Delete series in a library that no longer have any episodes.
+///
+/// Called after a scan to clean up shows whose files were removed. Episodes are
+/// never deleted here; stray rows are handled by the caller's item pruning.
+pub async fn prune_series(pool: &SqlitePool, library_id: i64) -> Result<u64, sqlx::Error> {
+    let result = sqlx::query(
+        "DELETE FROM series WHERE library_id = ? \
+         AND id NOT IN (SELECT series_id FROM media_items WHERE series_id IS NOT NULL)",
+    )
+    .bind(library_id)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected())
 }
 
 // --- Watch state (progress / continue watching) -----------------------------
@@ -713,6 +971,9 @@ mod tests {
             sidecars: Vec::new(),
             poster_path: None,
             backdrop_path: None,
+            series_id: None,
+            season: None,
+            episode: None,
         };
         upsert_media(pool, &item).await.unwrap().0
     }
@@ -804,5 +1065,169 @@ mod tests {
             .await
             .unwrap()
             .is_none());
+    }
+
+    async fn seed_episode(
+        pool: &SqlitePool,
+        library: i64,
+        series_id: i64,
+        title: &str,
+        season: i32,
+        episode: i32,
+    ) -> i64 {
+        let item = NewMediaItem {
+            library_id: library,
+            kind: flex_protocol::MediaKind::Episode,
+            title: title.into(),
+            sort_title: title.to_lowercase(),
+            year: None,
+            overview: None,
+            file_path: format!("/media/tv/{title}.mkv"),
+            file_size: 1,
+            container: Some("matroska".into()),
+            duration_ms: Some(100_000),
+            streams: Default::default(),
+            sidecars: Vec::new(),
+            poster_path: None,
+            backdrop_path: None,
+            series_id: Some(series_id),
+            season: Some(season),
+            episode: Some(episode),
+        };
+        upsert_media(pool, &item).await.unwrap().0
+    }
+
+    #[tokio::test]
+    async fn series_grouping_counts_and_detail() {
+        let pool = test_pool().await;
+        let library = upsert_library(&pool, "Shows", "/media/tv", LibraryKind::Tv)
+            .await
+            .unwrap();
+
+        let (series_id, added) = upsert_series(
+            &pool,
+            &NewSeries {
+                library_id: library,
+                title: "Some Show".into(),
+                sort_title: "some show".into(),
+                year: Some(2019),
+                overview: None,
+                poster_path: None,
+                backdrop_path: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(added);
+        // Upserting the same sort title is idempotent.
+        let (again, added) = upsert_series(
+            &pool,
+            &NewSeries {
+                library_id: library,
+                title: "Some Show".into(),
+                sort_title: "some show".into(),
+                year: None,
+                overview: None,
+                poster_path: Some("/media/tv/poster.jpg".into()),
+                backdrop_path: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(again, series_id);
+        assert!(!added);
+
+        seed_episode(&pool, library, series_id, "Some Show S01E01", 1, 1).await;
+        seed_episode(&pool, library, series_id, "Some Show S01E02", 1, 2).await;
+        seed_episode(&pool, library, series_id, "Some Show S02E01", 2, 1).await;
+
+        let page = list_series(&pool, &SeriesQuery::default()).await.unwrap();
+        assert_eq!(page.total, 1);
+        let series = &page.items[0];
+        assert_eq!(series.episode_count, 3);
+        assert_eq!(series.season_count, 2);
+        assert_eq!(series.year, Some(2019));
+        // Artwork discovered on the later scan is preserved/recorded.
+        assert!(series.poster_url.is_some());
+
+        // Filtered queries exercise the `series s` alias in both the count and
+        // the page query (regression: the count query previously omitted it).
+        let by_library = list_series(
+            &pool,
+            &SeriesQuery {
+                library_id: Some(library),
+                ..SeriesQuery::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(by_library.total, 1);
+        assert_eq!(by_library.items.len(), 1);
+
+        let missing = list_series(
+            &pool,
+            &SeriesQuery {
+                library_id: Some(library + 999),
+                ..SeriesQuery::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(missing.total, 0);
+
+        let by_search = list_series(
+            &pool,
+            &SeriesQuery {
+                q: Some("some".into()),
+                ..SeriesQuery::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(by_search.total, 1);
+
+        let no_match = list_series(
+            &pool,
+            &SeriesQuery {
+                q: Some("nothing".into()),
+                ..SeriesQuery::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(no_match.total, 0);
+
+        let detail = get_series_detail(&pool, series_id).await.unwrap().unwrap();
+        assert_eq!(detail.series.id, series_id);
+        assert_eq!(detail.seasons.len(), 2);
+        assert_eq!(detail.seasons[0].season_number, 1);
+        assert_eq!(detail.seasons[0].episodes.len(), 2);
+        assert_eq!(detail.seasons[0].episodes[0].episode, Some(1));
+        assert_eq!(detail.seasons[1].episodes.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn prune_series_removes_empty() {
+        let pool = test_pool().await;
+        let library = upsert_library(&pool, "Shows", "/media/tv", LibraryKind::Tv)
+            .await
+            .unwrap();
+        let (series_id, _) = upsert_series(
+            &pool,
+            &NewSeries {
+                library_id: library,
+                title: "Empty".into(),
+                sort_title: "empty".into(),
+                year: None,
+                overview: None,
+                poster_path: None,
+                backdrop_path: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(prune_series(&pool, library).await.unwrap(), 1);
+        assert!(get_series(&pool, series_id).await.unwrap().is_none());
     }
 }
