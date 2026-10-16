@@ -792,6 +792,7 @@ mod tests {
         }
     }
 
+    /// Build a movie fixture with the requested container and codecs for playback decisions.
     fn item(ext: &str, container: &str, video_codec: &str, audio_codec: &str) -> MediaItem {
         MediaItem {
             id: 1,
@@ -1179,6 +1180,7 @@ mod tests {
         .id
     }
 
+    /// Insert a movie fixture with a known duration for playback progress tests.
     async fn seed_item(pool: &sqlx::SqlitePool) -> i64 {
         let library = db::upsert_library(
             pool,

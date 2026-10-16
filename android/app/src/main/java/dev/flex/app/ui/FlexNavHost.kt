@@ -21,10 +21,12 @@ object Routes {
     const val PLAYER = "player/{id}"
 
     fun detail(id: Long) = "detail/$id"
+    /** Build the navigation route for the series identified by [id]. */
     fun series(id: Long) = "series/$id"
     fun player(id: Long) = "player/$id"
 }
 
+/** Host login, library, series, item detail, and playback navigation. */
 @Composable
 fun FlexNavHost(viewModel: MainViewModel = viewModel()) {
     val navController = rememberNavController()

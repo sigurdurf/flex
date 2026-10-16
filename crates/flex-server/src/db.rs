@@ -952,6 +952,7 @@ mod tests {
             .id
     }
 
+    /// Insert a movie fixture with the supplied file name and title, returning its ID.
     async fn seed_item_named(pool: &SqlitePool, file_name: &str, title: &str) -> i64 {
         let library = upsert_library(pool, "Movies", "/media/movies", LibraryKind::Movies)
             .await
@@ -1067,6 +1068,7 @@ mod tests {
             .is_none());
     }
 
+    /// Insert an episode fixture in the given series and season, returning its item ID.
     async fn seed_episode(
         pool: &SqlitePool,
         library: i64,
@@ -1097,6 +1099,8 @@ mod tests {
         upsert_media(pool, &item).await.unwrap().0
     }
 
+    /// Verify series upserts preserve metadata and filtered queries return season counts and
+    /// groups.
     #[tokio::test]
     async fn series_grouping_counts_and_detail() {
         let pool = test_pool().await;
@@ -1206,6 +1210,7 @@ mod tests {
         assert_eq!(detail.seasons[1].episodes.len(), 1);
     }
 
+    /// Verify pruning deletes a series that has no episodes.
     #[tokio::test]
     async fn prune_series_removes_empty() {
         let pool = test_pool().await;

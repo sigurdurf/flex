@@ -10,8 +10,7 @@ import { dirname, join } from "node:path";
 // that class of bug, which shipped once as an undefined `openSeries`.
 const appSource = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "app.js"), "utf8");
 
-// Remove comments and string/template literals so their contents do not look
-// like code, while keeping any `${...}` interpolation expressions.
+/** Strip comments and string literals while retaining template interpolation expressions. */
 function stripCommentsAndStrings(code) {
   let out = "";
   let i = 0;
@@ -80,6 +79,9 @@ function stripCommentsAndStrings(code) {
   return out;
 }
 
+/**
+ * Collect declared identifiers and parameters using lightweight patterns for the call audit.
+ */
 function collectDeclaredNames(code) {
   const declared = new Set();
   let match;

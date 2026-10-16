@@ -35,6 +35,7 @@ import dev.flex.app.data.model.Series
 import dev.flex.app.ui.MainViewModel
 import dev.flex.app.ui.detail.formatDuration
 
+/** Load [seriesId] and show its seasons, loading indicator, or request error. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SeriesScreen(
@@ -93,6 +94,7 @@ fun SeriesScreen(
     }
 }
 
+/** Render series metadata and season groups whose episodes invoke [onEpisodeClick]. */
 @Composable
 private fun SeriesContent(
     series: Series,
@@ -172,6 +174,7 @@ private fun SeriesContent(
     }
 }
 
+/** Render a selectable episode with its number, title, and available duration. */
 @Composable
 private fun EpisodeRow(episode: MediaItem, onClick: () -> Unit) {
     Column(
@@ -201,6 +204,7 @@ private fun EpisodeRow(episode: MediaItem, onClick: () -> Unit) {
     HorizontalDivider()
 }
 
+/** Format a positive episode number as E01, falling back to Episode otherwise. */
 private fun episodeLabel(episode: MediaItem): String {
     val number = episode.episode?.takeIf { it > 0 }
     return number?.let { "E%02d".format(it) } ?: "Episode"

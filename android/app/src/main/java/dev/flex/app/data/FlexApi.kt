@@ -50,6 +50,7 @@ interface FlexApi {
     @GET("api/v1/items/{id}")
     suspend fun item(@Path("id") id: Long): MediaItem
 
+    /** Fetch a page of series with optional library, title, and sort filters. */
     @GET("api/v1/series")
     suspend fun series(
         @Query("library_id") libraryId: Long? = null,
@@ -59,6 +60,7 @@ interface FlexApi {
         @Query("offset") offset: Long? = null,
     ): Page<Series>
 
+    /** Fetch series metadata and its episodes grouped by season. */
     @GET("api/v1/series/{id}")
     suspend fun seriesDetail(@Path("id") id: Long): SeriesDetail
 

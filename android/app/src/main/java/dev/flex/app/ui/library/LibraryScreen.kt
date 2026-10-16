@@ -49,6 +49,7 @@ import dev.flex.app.data.model.MediaItem
 import dev.flex.app.data.model.Series
 import dev.flex.app.ui.MainViewModel
 
+/** Show library navigation, continue watching, and paginated items or TV series. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun LibraryScreen(
@@ -300,6 +301,7 @@ private fun ContinueWatchingCard(
     }
 }
 
+/** Display item poster cards and a load-more control when additional pages exist. */
 @Composable
 private fun ItemGrid(
     items: List<MediaItem>,
@@ -333,6 +335,7 @@ private fun ItemGrid(
     }
 }
 
+/** Display series poster cards that open season details, with optional pagination. */
 @Composable
 private fun SeriesGrid(
     series: List<Series>,
@@ -366,11 +369,13 @@ private fun SeriesGrid(
     }
 }
 
+/** Format the season count with the series year when it is known. */
 private fun seasonLabel(series: Series): String {
     val seasons = if (series.seasonCount == 1L) "1 season" else "${series.seasonCount} seasons"
     return series.year?.let { "$it · $seasons" } ?: seasons
 }
 
+/** Show a centered control that invokes [onLoadMore] when selected. */
 @Composable
 private fun LoadMoreRow(onLoadMore: () -> Unit) {
     Box(
@@ -387,6 +392,7 @@ private fun LoadMoreRow(onLoadMore: () -> Unit) {
     }
 }
 
+/** Render a clickable poster with a fallback icon, title, and optional subtitle. */
 @Composable
 private fun PosterCard(
     title: String,

@@ -38,8 +38,7 @@ export function formatRuntime(ms) {
   return minutes >= 60 ? `${Math.floor(minutes / 60)}h ${minutes % 60}m` : `${minutes}m`;
 }
 
-// Series are a browsing convenience over episodes; these helpers keep the
-// pluralisation of season/episode counts and episode labels in one place.
+/** Return pluralized season and episode labels, treating missing or negative counts as zero. */
 export function seriesCounts(series) {
   const seasons = Math.max(0, Number(series?.season_count) || 0);
   const episodes = Math.max(0, Number(series?.episode_count) || 0);
@@ -49,6 +48,7 @@ export function seriesCounts(series) {
   };
 }
 
+/** Format a positive episode number with an E prefix and padding, or an em dash if unknown. */
 export function formatEpisodeNumber(number) {
   const value = Math.max(0, Number(number) || 0);
   return value > 0 ? "E" + String(value).padStart(2, "0") : "—";

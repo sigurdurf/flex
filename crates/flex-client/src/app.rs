@@ -318,6 +318,7 @@ fn check_health(state: &Rc<AppState>) {
     });
 }
 
+/// Connect scan, login, logout, library selection, and search actions to app state.
 fn connect_signals(state: &Rc<AppState>, scan_button: &Button, logout_button: &Button) {
     scan_button.connect_clicked({
         let state = state.clone();
@@ -485,6 +486,7 @@ fn load_libraries(state: &Rc<AppState>) {
     });
 }
 
+/// Rebuild sidebar rows and their library ID/kind mappings, selecting All initially.
 fn populate_libraries(state: &Rc<AppState>, libraries: &[Library]) {
     while let Some(child) = state.sidebar_list.first_child() {
         child.unparent();
@@ -526,6 +528,7 @@ fn library_icon(library: &Library) -> String {
     .to_string()
 }
 
+/// Refresh the selected library and search, routing TV libraries to series browsing.
 fn refresh_items(state: &Rc<AppState>) {
     if state.current_kind.get() == Some(LibraryKind::Tv) {
         refresh_series(state);
@@ -601,6 +604,7 @@ fn populate_flow(state: &Rc<AppState>, items: Vec<MediaItem>) {
     state.browse_stack.set_visible_child_name("grid");
 }
 
+/// Load up to 500 matching series and display the result or request error.
 fn refresh_series(state: &Rc<AppState>) {
     let query = SeriesQuery {
         library_id: state.current_library.get(),
@@ -644,6 +648,7 @@ fn refresh_series(state: &Rc<AppState>) {
         });
 }
 
+/// Replace the browse grid with series cards, or show the empty-series status.
 fn populate_series_flow(state: &Rc<AppState>, series: Vec<Series>) {
     while let Some(child) = state.flow.first_child() {
         child.unparent();
@@ -672,6 +677,7 @@ fn populate_series_flow(state: &Rc<AppState>, series: Vec<Series>) {
     state.browse_stack.set_visible_child_name("grid");
 }
 
+/// Load a series poster asynchronously, retaining the placeholder on failure.
 fn fill_series_artwork(state: &Rc<AppState>, id: i64, card: crate::ui::Card) {
     let api = state.api.clone();
     let card = Rc::new(card);
@@ -689,6 +695,7 @@ fn fill_series_artwork(state: &Rc<AppState>, id: i64, card: crate::ui::Card) {
     );
 }
 
+/// Fetch a series and push its season page, opening item details on episode activation.
 fn open_series(state: &Rc<AppState>, id: i64) {
     let api = state.api.clone();
     state

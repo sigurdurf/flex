@@ -914,6 +914,7 @@ mod tests {
     use super::*;
     use flex_protocol::MediaKind;
 
+    /// Build a movie fixture with a supplied title and year for subtitle query tests.
     fn item(title: &str, year: Option<i32>) -> MediaItem {
         MediaItem {
             id: 1,
@@ -1195,6 +1196,7 @@ mod tests {
         }
     }
 
+    /// Index the supplied media path as a known movie for subtitle handler tests.
     async fn seed_item(state: &AppState, media_path: &Path) -> i64 {
         let library_id = db::upsert_library(
             &state.pool,

@@ -72,11 +72,15 @@ function titleCount(count) { return `${count.toLocaleString()} ${count === 1 ? "
 function kindLabel(kind) { return { movie: "Movie", episode: "Episode", other: "Video" }[kind] || "Video"; }
 function mediaIcon(kind) { return kind === "episode" || kind === "tv" ? "tv" : kind === "movie" || kind === "movies" ? "film" : "folder"; }
 function validItem(item) { return item && Number.isSafeInteger(item.id) && typeof item.title === "string"; }
+/** Check that a series has the safe integer ID and title required for browsing. */
 function validSeries(series) { return series && Number.isSafeInteger(series.id) && typeof series.title === "string"; }
 
 // TV libraries browse shows rather than individual episode files.
+/** Return the selected library, or null for All media or an unknown library ID. */
 function activeLibrary() { return state.libraries.find(lib => lib.id === state.libraryId) || null; }
+/** Choose series browsing for a known TV library and item browsing otherwise. */
 function browseModeOf() { const lib = activeLibrary(); return lib && lib.kind === "tv" ? "series" : "items"; }
+/** Format a result count as series or titles for the current browse mode. */
 function countLabel(count) {
   const noun = state.browseMode === "series" ? "series" : count === 1 ? "title" : "titles";
   return `${count.toLocaleString()} ${noun}`;
@@ -126,6 +130,7 @@ function makePoster(item, eager = false) {
   return poster;
 }
 
+/** Cancel session work, clear media and artwork state, and return the previous API client. */
 function resetSession() {
   clearTimeout(searchTimer);
   const client = state.client;
@@ -184,6 +189,7 @@ function connect(server, token, user) {
   return client;
 }
 
+/** Reveal the signed-in app, restore its route, and start loading library and detail data. */
 function showApp(user) {
   state.user = user;
   $("startup").hidden = true;
@@ -260,6 +266,7 @@ async function logout() {
   }
 }
 
+/** Serialize browse and detail state into a hash, using the page URL for the default route. */
 function routeHash() {
   const params = new URLSearchParams();
   if (state.libraryId != null) params.set("library", state.libraryId);
@@ -270,6 +277,7 @@ function routeHash() {
   return params.size ? "#" + params : location.pathname + location.search;
 }
 
+/** Push or replace browser history with the current item, series, and browse route. */
 function writeRoute(replace = false) {
   history[replace ? "replaceState" : "pushState"]({
     flexItem: state.detailId,
@@ -278,6 +286,7 @@ function writeRoute(replace = false) {
   lastHistoryURL = location.href;
 }
 
+/** Restore browse and detail state from the URL hash and synchronize search controls. */
 function readRoute() {
   const params = new URLSearchParams(location.hash.slice(1));
   const id = value => /^\d+$/.test(value || "") ? Number(value) : null;
@@ -293,6 +302,7 @@ function readRoute() {
 
 function browseKey() { return JSON.stringify([state.libraryId, state.query, state.sort]); }
 
+/** Restore the active browse, series, or item view after Back, Forward, or hash navigation. */
 function onHistory() {
   if (!state.user || lastHistoryURL === location.href) return;
   lastHistoryURL = location.href;
@@ -335,6 +345,7 @@ function setMenu(open) {
   $("menu-toggle").setAttribute("aria-expanded", String(open));
 }
 
+/** Fetch library metadata and reload browsing if a TV deep link changes the browse mode. */
 async function loadLibraries() {
   const client = state.client;
   if (!client) return;
@@ -375,6 +386,7 @@ function renderLibraries() {
   nav.replaceChildren(fragment);
 }
 
+/** Update browse headings and labels using the selected library and active detail view. */
 function renderHeading() {
   const lib = activeLibrary();
   $("browse-heading").textContent = state.libraryId == null ? "All media" : lib?.name || "Library";
@@ -404,6 +416,7 @@ function renderSkeletons() {
   }
 }
 
+/** Build a media poster card that opens item details and supports browse focus restoration. */
 function mediaCard(item) {
   const card = button("media-card", "", () => openDetail(item.id));
   card.dataset.itemId = item.id;
@@ -420,6 +433,7 @@ function mediaCard(item) {
   return card;
 }
 
+/** Build a series poster card with season and episode counts that opens the series view. */
 function seriesCard(series) {
   const card = button("media-card", "", () => openSeries(series.id));
   card.dataset.seriesId = series.id;
@@ -437,6 +451,7 @@ function seriesCard(series) {
   return card;
 }
 
+/** Update loading, result counts, pagination, empty-state, and error controls. */
 function renderBrowseStatus() {
   $("grid").setAttribute("aria-busy", String(state.loading));
   const isSeries = state.browseMode === "series";
@@ -456,6 +471,7 @@ function renderBrowseStatus() {
   $("empty-clear").hidden = !state.query;
 }
 
+/** Reload the active item or series list, optionally retaining loaded cards during refresh. */
 async function reloadItems(preserve = false) {
   const client = state.client;
   if (!client) return;
@@ -480,6 +496,9 @@ async function loadMore() {
   await fetchItems(state.client, controller, true);
 }
 
+/**
+ * Fetch an item or series page, discard stale responses, and append or replace browse cards.
+ */
 async function fetchItems(client, controller, append) {
   const offset = append ? state.offset : 0;
   const params = new URLSearchParams({ limit: state.limit, offset, sort: state.sort });
@@ -575,6 +594,7 @@ function renderContinue() {
   }
 }
 
+/** Save browse scroll and focus, write the series route, and load its details. */
 function openSeries(id) {
   if (state.detailId == null && state.seriesId == null) {
     browseScroll = window.scrollY;
@@ -585,6 +605,7 @@ function openSeries(id) {
   loadSeries(id);
 }
 
+/** Open item details while retaining series context or saving browse scroll and focus. */
 function openDetail(id) {
   if (state.detailId == null && state.seriesId == null) {
     browseScroll = window.scrollY;
@@ -595,6 +616,7 @@ function openDetail(id) {
   loadDetail(id);
 }
 
+/** Cancel detail requests and return to browsing, optionally restoring scroll and focus. */
 function showBrowse(restore = true) {
   for (const key of ["detail", "progress", "subtitles", "series"]) state.requests.get(key)?.abort();
   state.detailId = null;
@@ -615,6 +637,7 @@ function showBrowse(restore = true) {
   });
 }
 
+/** Return through browser history or fall back to the containing series or library. */
 function backFromDetail() {
   if (history.state?.flexItem === state.detailId) { history.back(); return; }
   if (state.seriesId != null) {
@@ -626,18 +649,21 @@ function backFromDetail() {
     writeRoute(true);
   }
 }
+/** Return from a series through browser history or fall back to the library view. */
 function seriesBack() {
   if (history.state?.flexSeries === state.seriesId && history.state?.flexItem == null) { history.back(); return; }
   state.seriesId = null;
   showBrowse();
   writeRoute(true);
 }
+/** Reveal the series view and hide the browse and item detail views. */
 function showSeriesView() {
   $("library-view").hidden = true;
   $("detail-view").hidden = true;
   $("series-view").hidden = false;
 }
 
+/** Fetch and render a series with loading and error states, ignoring stale responses. */
 async function loadSeries(id) {
   const client = state.client;
   if (!client) return;
@@ -671,6 +697,7 @@ async function loadSeries(id) {
   }
 }
 
+/** Render series metadata, artwork, and season groups with episodes ordered by number. */
 function renderSeries(detail) {
   const series = detail.series;
   document.title = series.title + " | Flex";
@@ -703,6 +730,9 @@ function renderSeries(detail) {
   }
 }
 
+/**
+ * Load item details and progress, preserving series navigation and ignoring stale responses.
+ */
 async function loadDetail(id) {
   const client = state.client;
   if (!client) return;
@@ -1091,6 +1121,7 @@ async function scanMedia() {
   }
 }
 
+/** Connect navigation, library, retry, and playback controls to their event handlers. */
 function bindEvents() {
   $("login-form").addEventListener("submit", login);
   document.querySelector(".skip-link").addEventListener("click", event => {

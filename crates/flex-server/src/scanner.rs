@@ -423,6 +423,8 @@ fn find_artwork(video: &Path, kind: &str) -> Option<String> {
     None
 }
 
+/// Build a media row from probed streams and local sidecars, using episode metadata when
+/// supplied.
 fn build_item(
     library_id: i64,
     kind: MediaKind,
@@ -535,6 +537,8 @@ async fn collect_media_files(
     .unwrap_or_else(|e| (Vec::new(), vec![format!("walk task panicked: {e}")]))
 }
 
+/// Index a library, accumulate scan results and errors, and prune missing files and empty
+/// series.
 async fn scan_library(
     pool: &SqlitePool,
     library: &LibraryConfig,
@@ -705,10 +709,12 @@ mod tests {
         assert_eq!(sort_title("Theatre of Blood"), "theatre of blood");
     }
 
+    /// Parse a path string into episode metadata for scanner tests.
     fn episode(path: &str) -> EpisodeInfo {
         parse_episode(Path::new(path))
     }
 
+    /// Verify dotted file names supply the show title, season, and episode number.
     #[test]
     fn parses_dotted_season_episode() {
         let info = episode("/tv/The.Office.S03E05.720p.mkv");
@@ -718,6 +724,7 @@ mod tests {
         assert_eq!(info.episode, 5);
     }
 
+    /// Verify a release year before the episode marker is retained as series metadata.
     #[test]
     fn parses_compact_season_episode_with_year() {
         let info = episode("/tv/Breaking.Bad.2008.S01E01.mkv");
@@ -727,6 +734,7 @@ mod tests {
         assert_eq!(info.episode, 1);
     }
 
+    /// Verify an NxNN marker supplies episode numbers and falls back to the show folder title.
     #[test]
     fn parses_x_naming() {
         let info = episode("/tv/Firefly/1x02.mkv");
@@ -736,6 +744,7 @@ mod tests {
         assert_eq!(info.series_title, "Firefly");
     }
 
+    /// Verify a video resolution is ignored as an episode marker.
     #[test]
     fn resolution_is_not_mistaken_for_episode() {
         let info = episode("/tv/Some.Show.1280x720.mkv");
@@ -744,6 +753,7 @@ mod tests {
         assert_eq!(info.episode, 0);
     }
 
+    /// Verify a season folder supplies the season when the file has no episode marker.
     #[test]
     fn season_folder_supplies_season() {
         let info = episode("/tv/The Wire/Season 2/episode title.mkv");
@@ -752,6 +762,7 @@ mod tests {
         assert_eq!(info.episode, 0);
     }
 
+    /// Verify supported season and specials folders while rejecting unrelated names.
     #[test]
     fn season_folder_parsing() {
         assert_eq!(parse_season_folder("Season 1"), Some(1));
@@ -762,6 +773,7 @@ mod tests {
         assert_eq!(parse_season_folder("Movies"), None);
     }
 
+    /// Verify episode marker spellings return the expected character spans and numbers.
     #[test]
     fn season_episode_separator_variants() {
         assert_eq!(

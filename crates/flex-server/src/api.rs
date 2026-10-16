@@ -309,6 +309,7 @@ async fn get_item(
         .ok_or_else(|| AppError::not_found(format!("media item {id} not found")))
 }
 
+/// Return a page of series matching the supplied browse filters.
 async fn list_series(
     State(state): State<AppState>,
     Query(query): Query<SeriesQuery>,
@@ -317,6 +318,7 @@ async fn list_series(
     Ok(Json(page))
 }
 
+/// Return series metadata and season groups, or a not-found error for an unknown ID.
 async fn get_series(
     State(state): State<AppState>,
     Path(id): Path<i64>,

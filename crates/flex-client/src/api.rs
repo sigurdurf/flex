@@ -252,6 +252,7 @@ impl ApiClient {
         parse_json(resp, "/items").await
     }
 
+    /// Fetch a filtered, sorted page of series using the current authentication token.
     pub async fn series(&self, query: &SeriesQuery) -> Result<Page<Series>> {
         let qs = build_series_query(query);
         let path = series_path();
@@ -268,6 +269,7 @@ impl ApiClient {
         parse_json(resp, "/series").await
     }
 
+    /// Fetch series metadata and its season groups, propagating HTTP or decoding errors.
     pub async fn series_detail(&self, id: i64) -> Result<SeriesDetail> {
         let resp = self
             .add_auth(self.http.get(self.url(&series_item_path(id))))
@@ -542,6 +544,7 @@ mod tests {
         assert_eq!(build_query(&query), "");
     }
 
+    /// Verify series query encoding includes browse filters and omits the item kind.
     #[test]
     fn series_query_has_no_kind_param() {
         let query = SeriesQuery {

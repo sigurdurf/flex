@@ -62,6 +62,7 @@ class FlexRepository(
 
     suspend fun item(id: Long): MediaItem = api.item(id)
 
+    /** Fetch a series page sorted by title, omitting blank search queries. */
     suspend fun series(
         libraryId: Long?,
         query: String?,
@@ -75,6 +76,7 @@ class FlexRepository(
         offset = offset.toLong(),
     )
 
+    /** Fetch the series and season groups for [id], propagating API failures. */
     suspend fun seriesDetail(id: Long): SeriesDetail = api.seriesDetail(id)
 
     suspend fun continueWatching(
@@ -125,6 +127,7 @@ class FlexRepository(
 
     fun backdropUrl(item: MediaItem): String? = item.backdropUrl?.let(::absoluteUrl)
 
+    /** Return the absolute series poster URL, or null when no poster is available. */
     fun artworkUrl(series: Series): String? = series.posterUrl?.let(::absoluteUrl)
 
     /** Turns an API-relative path (e.g. `/api/v1/items/7/artwork`) into an absolute URL. */

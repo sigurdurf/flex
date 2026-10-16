@@ -120,6 +120,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         refreshItems()
     }
 
+    /** Clear the active browse list and load its first page of items or TV series. */
     fun refreshItems() {
         if (seriesMode) {
             seriesOffset = 0
@@ -132,6 +133,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    /** Append the next item page, delegating to series loading for TV libraries. */
     fun loadMoreItems() {
         if (seriesMode) {
             loadMoreSeries()
@@ -159,6 +161,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    /** Append a series page and update totals, loading state, and any request error. */
     fun loadMoreSeries() {
         if (seriesLoading) return
         seriesLoading = true
@@ -246,6 +249,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     var seriesDetailError by mutableStateOf<String?>(null)
         private set
 
+    /** Clear the previous series detail and asynchronously load [id] with error state. */
     fun loadSeriesDetail(id: Long) {
         seriesDetailLoading = true
         seriesDetailError = null
@@ -258,6 +262,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    /** Return the absolute series poster URL, or null when artwork is unavailable. */
     fun seriesArtworkUrl(series: Series): String? = repository.artworkUrl(series)
 
     // --- Playback ------------------------------------------------------------
@@ -314,6 +319,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     // --- Logout --------------------------------------------------------------
+    /** Log out, clear library and detail state, then invoke [onDone] for navigation. */
     fun logout(onDone: () -> Unit) {
         viewModelScope.launch {
             repository.logout()

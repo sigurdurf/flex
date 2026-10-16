@@ -46,6 +46,7 @@ pub fn build_series_card(series: &Series) -> Card {
     card
 }
 
+/// Build shared card widgets with a placeholder image, labels, and progress bar.
 fn build_card_inner(title_text: &str, subtitle_text: &str, placeholder_icon: &str) -> Card {
     let picture = Picture::new();
     picture.set_content_fit(gtk4::ContentFit::Cover);
