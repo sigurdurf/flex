@@ -87,6 +87,13 @@ config libraries ─┐
   (`spawn_blocking`) to avoid exhausting threads on large libraries.
 - **Parsing.** The JSON is mapped into `VideoStream`, `AudioStream`,
   `SubtitleStream` and container/duration fields from `flex-protocol`.
+- **Episode/series derivation.** For files in a TV library, the season and
+  episode number are parsed from the file name and/or folder layout (`S01E02`,
+  `1x02`, `Season 2/…`, `Specials/…`; the parser guards against resolutions such
+  as `1280x720` being mistaken for episode markers). Each show directory maps to
+  one `series` row; episodes are linked to it via `series_id` and given a
+  `"{title} S{season}E{episode}"` display title. Series with no remaining
+  episodes are pruned after the scan.
 - **Persistence.** Rows are upserted keyed by absolute `file_path`. Items whose
   files are no longer present are removed. Per-file errors are collected into
   `ScanReport.errors` rather than aborting the whole scan.
@@ -310,6 +317,45 @@ CREATE INDEX IF NOT EXISTS idx_watch_state_user_updated
 `watch_state` maps to the `WatchState` wire type; deleting a user or item
 cascades to their progress rows.
 
+TV series add a fourth table plus three columns on `media_items`, applied by the
+migration
+[`crates/flex-server/migrations/0004_series.sql`](../crates/flex-server/migrations/0004_series.sql).
+Episode `MediaItem`s reference their show via `series_id` and carry the parsed
+`season`/`episode` numbers; `season_count`/`episode_count` are computed per
+request rather than stored:
+
+```sql
+CREATE TABLE IF NOT EXISTS series (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    library_id   INTEGER NOT NULL REFERENCES libraries (id) ON DELETE CASCADE,
+    title        TEXT    NOT NULL,
+    sort_title   TEXT    NOT NULL,           -- normalised for sorting
+    year         INTEGER,
+    overview     TEXT,
+    poster_path  TEXT,
+    backdrop_path TEXT,
+    added_at     INTEGER NOT NULL,
+    updated_at   INTEGER NOT NULL,
+    UNIQUE (library_id, sort_title)
+);
+
+CREATE INDEX IF NOT EXISTS idx_series_library    ON series (library_id);
+CREATE INDEX IF NOT EXISTS idx_series_sort_title ON series (sort_title);
+
+-- applied by Rust (ALTER TABLE … ADD COLUMN is not idempotent):
+--   ALTER TABLE media_items ADD COLUMN series_id INTEGER REFERENCES series (id) ON DELETE SET NULL;
+--   ALTER TABLE media_items ADD COLUMN season    INTEGER;
+--   ALTER TABLE media_items ADD COLUMN episode   INTEGER;
+```
+
+Because SQLite's `ALTER TABLE … ADD COLUMN` is not idempotent, migration `0004`
+creates only the `series` table and its indexes; the three `media_items` columns
+are added from Rust (`ensure_series_columns`), which first consults
+`pragma_table_info('media_items')` so re-running a migration is safe. Series are
+derived at scan time (see the scan pipeline) and empty series are pruned after a
+scan. `series` maps to the `Series` wire type; `SeriesDetail` bundles the show
+with its `Season`s and episodes.
+
 ## API surface
 
 Full details and payload examples are in [`API.md`](API.md).
@@ -336,6 +382,9 @@ Full details and payload examples are in [`API.md`](API.md).
 | GET    | `/api/v1/items/{id}/artwork?type=…`       | Poster/backdrop image bytes.               |
 | GET    | `/api/v1/items/{id}/subtitles`            | List subtitle tracks.                      |
 | GET    | `/api/v1/items/{id}/subtitles/{track}`    | Extracted WebVTT subtitle track.           |
+| GET    | `/api/v1/series`                          | Browse/filter TV series (paginated `Page<T>`). |
+| GET    | `/api/v1/series/{id}`                     | Series detail with seasons and episodes.   |
+| GET    | `/api/v1/series/{id}/artwork?type=…`      | Series poster/backdrop image bytes.        |
 | GET    | `/api/v1/continue-watching`               | Resumable items for the current user.      |
 | GET    | `/api/v1/progress`                        | All saved watch state for the user.        |
 | GET    | `/api/v1/progress/{item_id}`              | Saved watch state for one item.            |

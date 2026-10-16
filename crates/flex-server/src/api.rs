@@ -13,8 +13,8 @@ use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use flex_protocol::{
     ContinueWatchingEntry, CreateUserRequest, Device, Health, ItemQuery, Library, LoginRequest,
-    LoginResponse, MediaItem, Page, ScanReport, SubtitleStream, UpdateProgressRequest, User,
-    UserRole, WatchState, API_VERSION,
+    LoginResponse, MediaItem, Page, ScanReport, Series, SeriesDetail, SeriesQuery, SubtitleStream,
+    UpdateProgressRequest, User, UserRole, WatchState, API_VERSION,
 };
 use serde::Deserialize;
 use sqlx::SqlitePool;
@@ -106,6 +106,9 @@ pub fn protected_router(state: AppState) -> Router<AppState> {
         .route("/api/v1/items/{id}", get(get_item))
         .route("/api/v1/items/{id}/artwork", get(artwork))
         .route("/api/v1/items/{id}/subtitles", get(list_subtitles))
+        .route("/api/v1/series", get(list_series))
+        .route("/api/v1/series/{id}", get(get_series))
+        .route("/api/v1/series/{id}/artwork", get(series_artwork))
         .route(
             "/api/v1/items/{id}/subtitles/{track}",
             get(get_subtitle_track),
@@ -304,6 +307,64 @@ async fn get_item(
         .await?
         .map(Json)
         .ok_or_else(|| AppError::not_found(format!("media item {id} not found")))
+}
+
+/// Return a page of series matching the supplied browse filters.
+async fn list_series(
+    State(state): State<AppState>,
+    Query(query): Query<SeriesQuery>,
+) -> Result<Json<Page<Series>>, AppError> {
+    let page = db::list_series(&state.pool, &query).await?;
+    Ok(Json(page))
+}
+
+/// Return series metadata and season groups, or a not-found error for an unknown ID.
+async fn get_series(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> Result<Json<SeriesDetail>, AppError> {
+    db::get_series_detail(&state.pool, id)
+        .await?
+        .map(Json)
+        .ok_or_else(|| AppError::not_found(format!("series {id} not found")))
+}
+
+/// Serve a series' poster or backdrop, mirroring the item artwork handler.
+async fn series_artwork(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    Query(query): Query<ArtworkQuery>,
+) -> Result<Response, AppError> {
+    let kind = query.kind.as_deref().unwrap_or("poster");
+    let (poster, backdrop) = db::get_series_artwork_paths(&state.pool, id)
+        .await?
+        .ok_or_else(|| AppError::not_found(format!("series {id} not found")))?;
+
+    let path_str = match kind {
+        "poster" => poster,
+        "backdrop" => backdrop,
+        other => {
+            return Err(AppError::bad_request(format!(
+                "unknown artwork type {other:?}; expected poster or backdrop"
+            )))
+        }
+    };
+
+    let path_str = path_str.ok_or_else(|| {
+        AppError::not_found(format!("no {kind} artwork available for series {id}"))
+    })?;
+
+    let bytes = tokio::fs::read(&path_str)
+        .await
+        .map_err(|_| AppError::not_found(format!("artwork file for series {id} is unavailable")))?;
+    let content_type = image_content_type(&path_str);
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, content_type)
+        .header(header::CONTENT_LENGTH, bytes.len())
+        .body(Body::from(bytes))
+        .map_err(|e| AppError::internal(e.to_string()))
 }
 
 /// Pagination query for `GET /continue-watching`.

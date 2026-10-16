@@ -11,8 +11,11 @@ import dev.flex.app.data.FlexRepository
 import dev.flex.app.data.TokenStore
 import dev.flex.app.data.model.ContinueWatchingEntry
 import dev.flex.app.data.model.Library
+import dev.flex.app.data.model.LibraryKind
 import dev.flex.app.data.model.MediaItem
 import dev.flex.app.data.model.PlaybackMode
+import dev.flex.app.data.model.Series
+import dev.flex.app.data.model.SeriesDetail
 import dev.flex.app.data.model.WatchState
 import kotlinx.coroutines.launch
 
@@ -84,7 +87,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     var total by mutableStateOf(0L)
         private set
 
+    var series by mutableStateOf<List<Series>>(emptyList())
+        private set
+    var seriesLoading by mutableStateOf(false)
+        private set
+    var seriesError by mutableStateOf<String?>(null)
+        private set
+    var seriesTotal by mutableStateOf(0L)
+        private set
+
     private var offset = 0
+    private var seriesOffset = 0
+
+    /** True when the selected library holds TV shows, which are browsed as series. */
+    val seriesMode: Boolean
+        get() = libraries.firstOrNull { it.id == selectedLibraryId }?.kind == LibraryKind.TV
 
     fun loadLibraries() {
         viewModelScope.launch {
@@ -103,13 +120,25 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         refreshItems()
     }
 
+    /** Clear the active browse list and load its first page of items or TV series. */
     fun refreshItems() {
-        offset = 0
-        items = emptyList()
-        loadMoreItems()
+        if (seriesMode) {
+            seriesOffset = 0
+            series = emptyList()
+            loadMoreSeries()
+        } else {
+            offset = 0
+            items = emptyList()
+            loadMoreItems()
+        }
     }
 
+    /** Append the next item page, delegating to series loading for TV libraries. */
     fun loadMoreItems() {
+        if (seriesMode) {
+            loadMoreSeries()
+            return
+        }
         if (itemsLoading) return
         itemsLoading = true
         itemsError = null
@@ -129,6 +158,30 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 itemsError = error.message ?: "Failed to load items"
             }
             itemsLoading = false
+        }
+    }
+
+    /** Append a series page and update totals, loading state, and any request error. */
+    fun loadMoreSeries() {
+        if (seriesLoading) return
+        seriesLoading = true
+        seriesError = null
+        viewModelScope.launch {
+            runCatching {
+                repository.series(
+                    libraryId = selectedLibraryId,
+                    query = query,
+                    limit = FlexRepository.PAGE_SIZE,
+                    offset = seriesOffset,
+                )
+            }.onSuccess { page ->
+                series = series + page.items
+                seriesTotal = page.total
+                seriesOffset = series.size
+            }.onFailure { error ->
+                seriesError = error.message ?: "Failed to load series"
+            }
+            seriesLoading = false
         }
     }
 
@@ -188,6 +241,30 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun backdropUrl(item: MediaItem): String? = repository.backdropUrl(item)
 
+    // --- Series --------------------------------------------------------------
+    var seriesDetail by mutableStateOf<SeriesDetail?>(null)
+        private set
+    var seriesDetailLoading by mutableStateOf(false)
+        private set
+    var seriesDetailError by mutableStateOf<String?>(null)
+        private set
+
+    /** Clear the previous series detail and asynchronously load [id] with error state. */
+    fun loadSeriesDetail(id: Long) {
+        seriesDetailLoading = true
+        seriesDetailError = null
+        seriesDetail = null
+        viewModelScope.launch {
+            runCatching { repository.seriesDetail(id) }
+                .onSuccess { seriesDetail = it }
+                .onFailure { seriesDetailError = it.message ?: "Failed to load series" }
+            seriesDetailLoading = false
+        }
+    }
+
+    /** Return the absolute series poster URL, or null when artwork is unavailable. */
+    fun seriesArtworkUrl(series: Series): String? = repository.artworkUrl(series)
+
     // --- Playback ------------------------------------------------------------
     var player by mutableStateOf(PlayerUiState())
         private set
@@ -242,11 +319,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     // --- Logout --------------------------------------------------------------
+    /** Log out, clear library and detail state, then invoke [onDone] for navigation. */
     fun logout(onDone: () -> Unit) {
         viewModelScope.launch {
             repository.logout()
             libraries = emptyList()
             items = emptyList()
+            series = emptyList()
+            seriesDetail = null
             detailItem = null
             detailProgress = null
             continueWatching = emptyList()

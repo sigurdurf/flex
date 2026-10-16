@@ -11,8 +11,8 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use flex_protocol::{
-    ContinueWatchingEntry, ItemQuery, Library, MediaItem, PlaybackSession, PlaybackStartRequest,
-    UpdateProgressRequest,
+    ContinueWatchingEntry, ItemQuery, Library, LibraryKind, MediaItem, PlaybackSession,
+    PlaybackStartRequest, Series, SeriesQuery, UpdateProgressRequest,
 };
 use gtk4::prelude::*;
 use gtk4::{gdk, glib, Align, Box as GtkBox, Button, Orientation, SelectionMode};
@@ -22,7 +22,10 @@ use libadwaita::prelude::*;
 use crate::api::{ApiClient, ApiError, ApiErrorKind};
 use crate::player::{client_capabilities, Player};
 use crate::session;
-use crate::ui::{build_card, build_continue_card, build_detail_page, LoginPage, PlayerPage};
+use crate::ui::{
+    build_card, build_continue_card, build_detail_page, build_series_card, build_series_page,
+    LoginPage, PlayerPage,
+};
 
 /// The currently running playback session, if any.
 struct ActivePlayback {
@@ -47,7 +50,9 @@ pub struct AppState {
     search: gtk4::SearchEntry,
     toast_overlay: adw::ToastOverlay,
     library_ids: RefCell<Vec<Option<i64>>>,
+    library_kinds: RefCell<Vec<Option<LibraryKind>>>,
     current_library: Cell<Option<i64>>,
+    current_kind: Cell<Option<LibraryKind>>,
     player: Rc<RefCell<Option<Player>>>,
     player_page: Rc<PlayerPage>,
     active: RefCell<Option<ActivePlayback>>,
@@ -210,7 +215,9 @@ pub fn build_ui(app: &adw::Application, api: ApiClient) -> adw::ApplicationWindo
         search: search.clone(),
         toast_overlay: toast_overlay.clone(),
         library_ids: RefCell::new(Vec::new()),
+        library_kinds: RefCell::new(Vec::new()),
         current_library: Cell::new(None),
+        current_kind: Cell::new(None),
         player: player.clone(),
         player_page: player_page.clone(),
         active: RefCell::new(None),
@@ -311,6 +318,7 @@ fn check_health(state: &Rc<AppState>) {
     });
 }
 
+/// Connect scan, login, logout, library selection, and search actions to app state.
 fn connect_signals(state: &Rc<AppState>, scan_button: &Button, logout_button: &Button) {
     scan_button.connect_clicked({
         let state = state.clone();
@@ -352,7 +360,9 @@ fn connect_signals(state: &Rc<AppState>, scan_button: &Button, logout_button: &B
         move |_, row| {
             let index = row.index().max(0) as usize;
             let id = state.library_ids.borrow().get(index).copied().flatten();
+            let kind = state.library_kinds.borrow().get(index).copied().flatten();
             state.current_library.set(id);
+            state.current_kind.set(kind);
             refresh_items(&state);
         }
     });
@@ -476,12 +486,15 @@ fn load_libraries(state: &Rc<AppState>) {
     });
 }
 
+/// Rebuild sidebar rows and their library ID/kind mappings, selecting All initially.
 fn populate_libraries(state: &Rc<AppState>, libraries: &[Library]) {
     while let Some(child) = state.sidebar_list.first_child() {
         child.unparent();
     }
     let mut ids: Vec<Option<i64>> = Vec::with_capacity(libraries.len() + 1);
+    let mut kinds: Vec<Option<LibraryKind>> = Vec::with_capacity(libraries.len() + 1);
     ids.push(None);
+    kinds.push(None);
 
     let all_row = adw::ActionRow::builder().title("All").build();
     all_row.add_prefix(&gtk4::Image::from_icon_name("view-grid-symbolic"));
@@ -489,6 +502,7 @@ fn populate_libraries(state: &Rc<AppState>, libraries: &[Library]) {
 
     for library in libraries {
         ids.push(Some(library.id));
+        kinds.push(Some(library.kind));
         let row = adw::ActionRow::builder()
             .title(library.name.clone())
             .subtitle(format!("{} items", library.item_count))
@@ -498,6 +512,7 @@ fn populate_libraries(state: &Rc<AppState>, libraries: &[Library]) {
     }
 
     *state.library_ids.borrow_mut() = ids;
+    *state.library_kinds.borrow_mut() = kinds;
     if let Some(first) = state.sidebar_list.row_at_index(0) {
         state.sidebar_list.select_row(Some(&first));
     }
@@ -513,7 +528,13 @@ fn library_icon(library: &Library) -> String {
     .to_string()
 }
 
+/// Refresh the selected library and search, routing TV libraries to series browsing.
 fn refresh_items(state: &Rc<AppState>) {
+    if state.current_kind.get() == Some(LibraryKind::Tv) {
+        refresh_series(state);
+        return;
+    }
+
     let query = ItemQuery {
         library_id: state.current_library.get(),
         kind: None,
@@ -581,6 +602,118 @@ fn populate_flow(state: &Rc<AppState>, items: Vec<MediaItem>) {
     }
 
     state.browse_stack.set_visible_child_name("grid");
+}
+
+/// Load up to 500 matching series and display the result or request error.
+fn refresh_series(state: &Rc<AppState>) {
+    let query = SeriesQuery {
+        library_id: state.current_library.get(),
+        q: {
+            let text = state.search.text().to_string();
+            if text.trim().is_empty() {
+                None
+            } else {
+                Some(text)
+            }
+        },
+        sort: Some("title".to_string()),
+        limit: Some(500),
+        offset: None,
+    };
+
+    state.browse_stack.set_visible_child_name("status");
+    state
+        .status_page
+        .set_icon_name(Some("content-loading-symbolic"));
+    state.status_page.set_title("Loading…");
+    state.status_page.set_description(None);
+
+    let api = state.api.clone();
+    state
+        .api
+        .dispatch(async move { api.series(&query).await }, {
+            let state = state.clone();
+            move |result| match result {
+                Ok(page) => populate_series_flow(&state, page.items),
+                Err(err) if is_unauthorized(&err) => bounce_to_login(&state),
+                Err(err) => {
+                    show_status(
+                        &state,
+                        "network-error-symbolic",
+                        "Failed to load series",
+                        &format!("{err:#}"),
+                    );
+                }
+            }
+        });
+}
+
+/// Replace the browse grid with series cards, or show the empty-series status.
+fn populate_series_flow(state: &Rc<AppState>, series: Vec<Series>) {
+    while let Some(child) = state.flow.first_child() {
+        child.unparent();
+    }
+    if series.is_empty() {
+        show_status(
+            state,
+            "video-display-symbolic",
+            "No series found",
+            "Scan a library or adjust your search.",
+        );
+        return;
+    }
+
+    for show in series {
+        let card = build_series_card(&show);
+        state.flow.append(&card.button);
+
+        let id = show.id;
+        let state_click = state.clone();
+        card.button
+            .connect_clicked(move |_| open_series(&state_click, id));
+        fill_series_artwork(state, id, card);
+    }
+
+    state.browse_stack.set_visible_child_name("grid");
+}
+
+/// Load a series poster asynchronously, retaining the placeholder on failure.
+fn fill_series_artwork(state: &Rc<AppState>, id: i64, card: crate::ui::Card) {
+    let api = state.api.clone();
+    let card = Rc::new(card);
+    state.api.dispatch(
+        async move { api.series_artwork_bytes(id, "poster").await },
+        move |result| {
+            if let Ok(Some(bytes)) = result {
+                let bytes = glib::Bytes::from(&bytes);
+                if let Ok(texture) = gdk::Texture::from_bytes(&bytes) {
+                    card.picture.set_paintable(Some(&texture));
+                    card.stack.set_visible_child_name("art");
+                }
+            }
+        },
+    );
+}
+
+/// Fetch a series and push its season page, opening item details on episode activation.
+fn open_series(state: &Rc<AppState>, id: i64) {
+    let api = state.api.clone();
+    state
+        .api
+        .dispatch(async move { api.series_detail(id).await }, {
+            let state = state.clone();
+            move |result| match result {
+                Ok(detail) => {
+                    let state_episode = state.clone();
+                    let page = build_series_page(&detail, move |episode_id| {
+                        open_detail(&state_episode, episode_id);
+                    });
+                    state.nav_view.push(&page);
+                }
+                Err(err) if is_unauthorized(&err) => bounce_to_login(&state),
+                Err(err) => toast(&state, &format!("Failed to load series: {err:#}")),
+            }
+        });
 }
 
 fn load_continue_watching(state: &Rc<AppState>) {

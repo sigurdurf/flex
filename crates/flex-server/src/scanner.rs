@@ -9,7 +9,7 @@ use sqlx::SqlitePool;
 use walkdir::WalkDir;
 
 use crate::config::{Config, LibraryConfig};
-use crate::model::{NewMediaItem, SidecarTrack, SIDECAR_INDEX_BASE};
+use crate::model::{NewMediaItem, NewSeries, SidecarTrack, SIDECAR_INDEX_BASE};
 use crate::probe;
 use crate::{db, probe::Probed};
 
@@ -86,6 +86,232 @@ pub fn sort_title(title: &str) -> String {
         }
     }
     lower
+}
+
+/// Episode position parsed from a TV file, used to group episodes into series.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EpisodeInfo {
+    pub series_title: String,
+    pub series_year: Option<i32>,
+    pub season: i32,
+    pub episode: i32,
+    /// Directory holding the show (used to locate series artwork).
+    pub show_dir: Option<PathBuf>,
+}
+
+/// Read up to `max` ASCII digits starting at `start`, returning `(end, value)`.
+/// `end` is the index just past the last digit consumed.
+fn read_digits(chars: &[char], start: usize, max: usize) -> Option<(usize, i32)> {
+    let mut end = start;
+    let mut value: i32 = 0;
+    while end < chars.len() && end - start < max && chars[end].is_ascii_digit() {
+        value = value * 10 + (chars[end] as u32 - '0' as u32) as i32;
+        end += 1;
+    }
+    if end == start {
+        None
+    } else {
+        Some((end, value))
+    }
+}
+
+/// Skip a single separator character (`.`, `_`, `-`, space) if present.
+fn skip_separator(chars: &[char], index: usize) -> usize {
+    if index < chars.len() && matches!(chars[index], '.' | '_' | '-' | ' ') {
+        index + 1
+    } else {
+        index
+    }
+}
+
+/// Locate a season/episode marker in a file stem, supporting `S01E02`,
+/// `S01.E02`, `1x02` and similar spellings.
+///
+/// Returns `(start, end, season, episode)` as character indices, where the
+/// match spans `chars[start..end]`. The marker must not be glued to a preceding
+/// alphanumeric character, which avoids mistaking resolutions such as
+/// `1280x720` for episodes.
+fn find_season_episode(chars: &[char]) -> Option<(usize, usize, i32, i32)> {
+    let n = chars.len();
+    for i in 0..n {
+        if i > 0 && chars[i - 1].is_ascii_alphanumeric() {
+            continue;
+        }
+        // S##E##
+        if chars[i] == 's' || chars[i] == 'S' {
+            if let Some((after_season, season)) = read_digits(chars, i + 1, 2) {
+                let e_index = skip_separator(chars, after_season);
+                if e_index < n && (chars[e_index] == 'e' || chars[e_index] == 'E') {
+                    let digits_at = skip_separator(chars, e_index + 1);
+                    if let Some((end, episode)) = read_digits(chars, digits_at, 3) {
+                        return Some((i, end, season, episode));
+                    }
+                }
+            }
+        }
+        // ##x##
+        if chars[i].is_ascii_digit() {
+            if let Some((after_season, season)) = read_digits(chars, i, 2) {
+                let x_index = skip_separator(chars, after_season);
+                if x_index < n && (chars[x_index] == 'x' || chars[x_index] == 'X') {
+                    let digits_at = skip_separator(chars, x_index + 1);
+                    if let Some((end, episode)) = read_digits(chars, digits_at, 3) {
+                        return Some((i, end, season, episode));
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Parse a season number from a folder name (`Season 1`, `S01`, `Specials`).
+fn parse_season_folder(name: &str) -> Option<i32> {
+    let lower = name.trim().to_ascii_lowercase();
+    if lower == "specials" || lower == "special" {
+        return Some(0);
+    }
+    for prefix in ["season ", "season.", "season_", "s"] {
+        let Some(rest) = lower.strip_prefix(prefix) else {
+            continue;
+        };
+        let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+        if digits.is_empty() {
+            continue;
+        }
+        // A bare `s` prefix must be followed by digits only, so show names that
+        // merely begin with an "s" are not treated as season folders.
+        if prefix == "s" && rest.chars().any(|c| !c.is_ascii_digit()) {
+            continue;
+        }
+        if let Ok(season) = digits.parse::<i32>() {
+            return Some(season);
+        }
+    }
+    None
+}
+
+/// Resolve the show directory for an episode and any season number encoded in
+/// the immediate parent folder.
+fn show_directory(path: &Path) -> (Option<PathBuf>, Option<i32>) {
+    let Some(parent) = path.parent() else {
+        return (None, None);
+    };
+    if let Some(name) = parent.file_name().and_then(|n| n.to_str()) {
+        if let Some(season) = parse_season_folder(name) {
+            if let Some(show) = parent.parent() {
+                return (Some(show.to_path_buf()), Some(season));
+            }
+        }
+    }
+    (Some(parent.to_path_buf()), None)
+}
+
+/// Trim trailing separators left over before a season/episode marker.
+fn clean_episode_prefix(prefix: &str) -> String {
+    prefix
+        .trim()
+        .trim_end_matches(['.', '_', '-', ' '])
+        .trim()
+        .to_string()
+}
+
+/// Derive a series title (and year) from the show directory name.
+fn series_from_dir(dir: Option<&Path>) -> (String, Option<i32>) {
+    match dir.and_then(|d| d.file_name()).and_then(|n| n.to_str()) {
+        Some(name) => parse_title_and_year(name),
+        None => ("Unknown Series".to_string(), None),
+    }
+}
+
+/// Parse series/season/episode information from a TV episode file.
+///
+/// The show title comes from the file name (everything before the episode
+/// marker) or, failing that, the containing folder. Season falls back to a
+/// `Season N` parent folder, and the episode is `0` when nothing can be found.
+pub fn parse_episode(path: &Path) -> EpisodeInfo {
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("Untitled");
+    let chars: Vec<char> = stem.chars().collect();
+    let (show_dir, folder_season) = show_directory(path);
+
+    if let Some((start, _end, season, episode)) = find_season_episode(&chars) {
+        let prefix: String = chars[..start].iter().collect();
+        let cleaned = clean_episode_prefix(&prefix);
+        let (series_title, series_year) = if cleaned.is_empty() {
+            series_from_dir(show_dir.as_deref())
+        } else {
+            parse_title_and_year(&cleaned)
+        };
+        return EpisodeInfo {
+            series_title,
+            series_year,
+            season,
+            episode,
+            show_dir,
+        };
+    }
+
+    let (series_title, series_year) = series_from_dir(show_dir.as_deref());
+    EpisodeInfo {
+        series_title,
+        series_year,
+        season: folder_season.unwrap_or(0),
+        episode: 0,
+        show_dir,
+    }
+}
+
+/// Look for artwork inside a directory (used for series, whose artwork lives in
+/// the show folder rather than beside a specific file).
+fn find_dir_artwork(dir: &Path, kind: &str) -> Option<String> {
+    let names: &[&str] = match kind {
+        "poster" => &[
+            "poster.jpg",
+            "poster.png",
+            "folder.jpg",
+            "folder.png",
+            "cover.jpg",
+            "cover.png",
+        ],
+        _ => &[
+            "backdrop.jpg",
+            "backdrop.png",
+            "fanart.jpg",
+            "fanart.png",
+            "background.jpg",
+            "background.png",
+        ],
+    };
+    for name in names {
+        let candidate = dir.join(name);
+        if candidate.is_file() {
+            return Some(candidate.to_string_lossy().into_owned());
+        }
+    }
+    None
+}
+
+/// Build the database row for the series an episode belongs to.
+fn series_row(library_id: i64, info: &EpisodeInfo) -> NewSeries {
+    let (poster, backdrop) = match info.show_dir.as_deref() {
+        Some(dir) => (
+            find_dir_artwork(dir, "poster"),
+            find_dir_artwork(dir, "backdrop"),
+        ),
+        None => (None, None),
+    };
+    NewSeries {
+        library_id,
+        title: info.series_title.clone(),
+        sort_title: sort_title(&info.series_title),
+        year: info.series_year,
+        overview: None,
+        poster_path: poster,
+        backdrop_path: backdrop,
+    }
 }
 
 /// Map a library kind to the media kind its files represent.
@@ -197,13 +423,39 @@ fn find_artwork(video: &Path, kind: &str) -> Option<String> {
     None
 }
 
-fn build_item(library_id: i64, kind: MediaKind, path: &Path, probed: &Probed) -> NewMediaItem {
+/// Build a media row from probed streams and local sidecars, using episode metadata when
+/// supplied.
+fn build_item(
+    library_id: i64,
+    kind: MediaKind,
+    path: &Path,
+    probed: &Probed,
+    episode: Option<&EpisodeInfo>,
+) -> NewMediaItem {
     let stem = path
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("Untitled");
-    let (title, year) = parse_title_and_year(stem);
-    let sort = sort_title(&title);
+    let (title, year, sort) = match episode {
+        Some(info) => {
+            // Prefer a clean "Show S01E02" label; fall back to the file name when
+            // no episode number could be parsed.
+            let title = if info.episode > 0 {
+                format!(
+                    "{} S{:02}E{:02}",
+                    info.series_title, info.season, info.episode
+                )
+            } else {
+                parse_title_and_year(stem).0
+            };
+            (title, info.series_year, sort_title(&info.series_title))
+        }
+        None => {
+            let (title, year) = parse_title_and_year(stem);
+            let sort = sort_title(&title);
+            (title, year, sort)
+        }
+    };
     NewMediaItem {
         library_id,
         kind,
@@ -219,6 +471,9 @@ fn build_item(library_id: i64, kind: MediaKind, path: &Path, probed: &Probed) ->
         sidecars: find_sidecars(path),
         poster_path: find_artwork(path, "poster"),
         backdrop_path: find_artwork(path, "backdrop"),
+        series_id: None,
+        season: episode.map(|e| e.season),
+        episode: episode.map(|e| e.episode),
     }
 }
 
@@ -232,7 +487,16 @@ pub async fn reindex_item(pool: &SqlitePool, id: i64) -> anyhow::Result<()> {
         .ok_or_else(|| anyhow::anyhow!("media item {id} not found"))?;
     let path = PathBuf::from(&item.file_path);
     let probed = probe::probe_file(&path).await?;
-    let new_item = build_item(item.library_id, item.kind, &path, &probed);
+    let episode = if item.kind == MediaKind::Episode {
+        Some(parse_episode(&path))
+    } else {
+        None
+    };
+    let mut new_item = build_item(item.library_id, item.kind, &path, &probed, episode.as_ref());
+    if let Some(info) = episode.as_ref() {
+        let (series_id, _) = db::upsert_series(pool, &series_row(item.library_id, info)).await?;
+        new_item.series_id = Some(series_id);
+    }
     db::upsert_media(pool, &new_item).await?;
     Ok(())
 }
@@ -273,6 +537,8 @@ async fn collect_media_files(
     .unwrap_or_else(|e| (Vec::new(), vec![format!("walk task panicked: {e}")]))
 }
 
+/// Index a library, accumulate scan results and errors, and prune missing files and empty
+/// series.
 async fn scan_library(
     pool: &SqlitePool,
     library: &LibraryConfig,
@@ -314,7 +580,18 @@ async fn scan_library(
         seen.insert(path_str.clone());
         match probed {
             Ok(probed) => {
-                let item = build_item(library_id, kind, &path, &probed);
+                let episode = if kind == MediaKind::Episode {
+                    Some(parse_episode(&path))
+                } else {
+                    None
+                };
+                let mut item = build_item(library_id, kind, &path, &probed, episode.as_ref());
+                if let Some(info) = episode.as_ref() {
+                    match db::upsert_series(pool, &series_row(library_id, info)).await {
+                        Ok((series_id, _)) => item.series_id = Some(series_id),
+                        Err(err) => report.errors.push(format!("{}: {err}", path.display())),
+                    }
+                }
                 match db::upsert_media(pool, &item).await {
                     Ok((_, added)) => {
                         if added {
@@ -346,6 +623,15 @@ async fn scan_library(
         Err(err) => report
             .errors
             .push(format!("library {}: {err}", library.name)),
+    }
+
+    // Drop series whose episodes were all removed.
+    if kind == MediaKind::Episode {
+        if let Err(err) = db::prune_series(pool, library_id).await {
+            report
+                .errors
+                .push(format!("library {}: {err}", library.name));
+        }
     }
 }
 
@@ -421,5 +707,86 @@ mod tests {
         assert_eq!(sort_title("Blade Runner"), "blade runner");
         // Only a leading article is removed.
         assert_eq!(sort_title("Theatre of Blood"), "theatre of blood");
+    }
+
+    /// Parse a path string into episode metadata for scanner tests.
+    fn episode(path: &str) -> EpisodeInfo {
+        parse_episode(Path::new(path))
+    }
+
+    /// Verify dotted file names supply the show title, season, and episode number.
+    #[test]
+    fn parses_dotted_season_episode() {
+        let info = episode("/tv/The.Office.S03E05.720p.mkv");
+        assert_eq!(info.series_title, "The Office");
+        assert_eq!(info.series_year, None);
+        assert_eq!(info.season, 3);
+        assert_eq!(info.episode, 5);
+    }
+
+    /// Verify a release year before the episode marker is retained as series metadata.
+    #[test]
+    fn parses_compact_season_episode_with_year() {
+        let info = episode("/tv/Breaking.Bad.2008.S01E01.mkv");
+        assert_eq!(info.series_title, "Breaking Bad");
+        assert_eq!(info.series_year, Some(2008));
+        assert_eq!(info.season, 1);
+        assert_eq!(info.episode, 1);
+    }
+
+    /// Verify an NxNN marker supplies episode numbers and falls back to the show folder title.
+    #[test]
+    fn parses_x_naming() {
+        let info = episode("/tv/Firefly/1x02.mkv");
+        assert_eq!(info.season, 1);
+        assert_eq!(info.episode, 2);
+        // No title before the marker, so the folder name is used.
+        assert_eq!(info.series_title, "Firefly");
+    }
+
+    /// Verify a video resolution is ignored as an episode marker.
+    #[test]
+    fn resolution_is_not_mistaken_for_episode() {
+        let info = episode("/tv/Some.Show.1280x720.mkv");
+        // No episode marker; falls back to the folder name and episode 0.
+        assert_eq!(info.series_title, "tv");
+        assert_eq!(info.episode, 0);
+    }
+
+    /// Verify a season folder supplies the season when the file has no episode marker.
+    #[test]
+    fn season_folder_supplies_season() {
+        let info = episode("/tv/The Wire/Season 2/episode title.mkv");
+        assert_eq!(info.series_title, "The Wire");
+        assert_eq!(info.season, 2);
+        assert_eq!(info.episode, 0);
+    }
+
+    /// Verify supported season and specials folders while rejecting unrelated names.
+    #[test]
+    fn season_folder_parsing() {
+        assert_eq!(parse_season_folder("Season 1"), Some(1));
+        assert_eq!(parse_season_folder("season 01"), Some(1));
+        assert_eq!(parse_season_folder("S03"), Some(3));
+        assert_eq!(parse_season_folder("Specials"), Some(0));
+        assert_eq!(parse_season_folder("Severance"), None);
+        assert_eq!(parse_season_folder("Movies"), None);
+    }
+
+    /// Verify episode marker spellings return the expected character spans and numbers.
+    #[test]
+    fn season_episode_separator_variants() {
+        assert_eq!(
+            find_season_episode(&"S01.E02".chars().collect::<Vec<_>>()),
+            Some((0, 7, 1, 2))
+        );
+        assert_eq!(
+            find_season_episode(&"S1E2".chars().collect::<Vec<_>>()),
+            Some((0, 4, 1, 2))
+        );
+        assert_eq!(
+            find_season_episode(&"prefix 12x03".chars().collect::<Vec<_>>()),
+            Some((7, 12, 12, 3))
+        );
     }
 }

@@ -8,6 +8,8 @@ import dev.flex.app.data.model.MediaItem
 import dev.flex.app.data.model.Page
 import dev.flex.app.data.model.PlaybackSession
 import dev.flex.app.data.model.PlaybackStartRequest
+import dev.flex.app.data.model.Series
+import dev.flex.app.data.model.SeriesDetail
 import dev.flex.app.data.model.StopPlaybackRequest
 import dev.flex.app.data.model.UpdateProgressRequest
 import dev.flex.app.data.model.User
@@ -47,6 +49,20 @@ interface FlexApi {
 
     @GET("api/v1/items/{id}")
     suspend fun item(@Path("id") id: Long): MediaItem
+
+    /** Fetch a page of series with optional library, title, and sort filters. */
+    @GET("api/v1/series")
+    suspend fun series(
+        @Query("library_id") libraryId: Long? = null,
+        @Query("q") q: String? = null,
+        @Query("sort") sort: String? = null,
+        @Query("limit") limit: Long? = null,
+        @Query("offset") offset: Long? = null,
+    ): Page<Series>
+
+    /** Fetch series metadata and its episodes grouped by season. */
+    @GET("api/v1/series/{id}")
+    suspend fun seriesDetail(@Path("id") id: Long): SeriesDetail
 
     @POST("api/v1/playback/start")
     suspend fun playbackStart(@Body request: PlaybackStartRequest): PlaybackSession

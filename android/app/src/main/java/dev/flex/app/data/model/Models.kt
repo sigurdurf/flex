@@ -216,6 +216,37 @@ data class MediaItem(
     @SerialName("updated_at") val updatedAt: Long,
     @SerialName("poster_url") val posterUrl: String? = null,
     @SerialName("backdrop_url") val backdropUrl: String? = null,
+    @SerialName("series_id") val seriesId: Long? = null,
+    val season: Int? = null,
+    val episode: Int? = null,
+)
+
+@Serializable
+data class Series(
+    val id: Long,
+    @SerialName("library_id") val libraryId: Long,
+    val title: String,
+    @SerialName("sort_title") val sortTitle: String,
+    val year: Int? = null,
+    val overview: String? = null,
+    @SerialName("added_at") val addedAt: Long,
+    @SerialName("updated_at") val updatedAt: Long,
+    @SerialName("season_count") val seasonCount: Long,
+    @SerialName("episode_count") val episodeCount: Long,
+    @SerialName("poster_url") val posterUrl: String? = null,
+    @SerialName("backdrop_url") val backdropUrl: String? = null,
+)
+
+@Serializable
+data class Season(
+    @SerialName("season_number") val seasonNumber: Int,
+    val episodes: List<MediaItem>,
+)
+
+@Serializable
+data class SeriesDetail(
+    val series: Series,
+    val seasons: List<Season>,
 )
 
 @Serializable

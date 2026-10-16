@@ -8,6 +8,8 @@ import dev.flex.app.data.model.MediaItem
 import dev.flex.app.data.model.Page
 import dev.flex.app.data.model.PlaybackSession
 import dev.flex.app.data.model.PlaybackStartRequest
+import dev.flex.app.data.model.Series
+import dev.flex.app.data.model.SeriesDetail
 import dev.flex.app.data.model.StopPlaybackRequest
 import dev.flex.app.data.model.UpdateProgressRequest
 import dev.flex.app.data.model.User
@@ -60,6 +62,23 @@ class FlexRepository(
 
     suspend fun item(id: Long): MediaItem = api.item(id)
 
+    /** Fetch a series page sorted by title, omitting blank search queries. */
+    suspend fun series(
+        libraryId: Long?,
+        query: String?,
+        limit: Int = PAGE_SIZE,
+        offset: Int = 0,
+    ): Page<Series> = api.series(
+        libraryId = libraryId,
+        q = query?.takeIf { it.isNotBlank() },
+        sort = "sort_title",
+        limit = limit.toLong(),
+        offset = offset.toLong(),
+    )
+
+    /** Fetch the series and season groups for [id], propagating API failures. */
+    suspend fun seriesDetail(id: Long): SeriesDetail = api.seriesDetail(id)
+
     suspend fun continueWatching(
         limit: Int = CONTINUE_LIMIT,
         offset: Int = 0,
@@ -107,6 +126,9 @@ class FlexRepository(
     fun artworkUrl(item: MediaItem): String? = item.posterUrl?.let(::absoluteUrl)
 
     fun backdropUrl(item: MediaItem): String? = item.backdropUrl?.let(::absoluteUrl)
+
+    /** Return the absolute series poster URL, or null when no poster is available. */
+    fun artworkUrl(series: Series): String? = series.posterUrl?.let(::absoluteUrl)
 
     /** Turns an API-relative path (e.g. `/api/v1/items/7/artwork`) into an absolute URL. */
     fun absoluteUrl(relative: String): String {

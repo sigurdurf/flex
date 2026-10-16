@@ -914,6 +914,7 @@ mod tests {
     use super::*;
     use flex_protocol::MediaKind;
 
+    /// Build a movie fixture with a supplied title and year for subtitle query tests.
     fn item(title: &str, year: Option<i32>) -> MediaItem {
         MediaItem {
             id: 1,
@@ -934,6 +935,9 @@ mod tests {
             updated_at: 0,
             poster_url: None,
             backdrop_url: None,
+            series_id: None,
+            season: None,
+            episode: None,
         }
     }
 
@@ -1192,6 +1196,7 @@ mod tests {
         }
     }
 
+    /// Index the supplied media path as a known movie for subtitle handler tests.
     async fn seed_item(state: &AppState, media_path: &Path) -> i64 {
         let library_id = db::upsert_library(
             &state.pool,
@@ -1216,6 +1221,9 @@ mod tests {
             sidecars: Vec::new(),
             poster_path: None,
             backdrop_path: None,
+            series_id: None,
+            season: None,
+            episode: None,
         };
         db::upsert_media(&state.pool, &new_item).await.unwrap().0
     }

@@ -201,6 +201,17 @@ p { margin-bottom: 0; }
 #sub-search-status { margin-top: 16px; }
 #detail-progress-error { margin-top: 16px; }
 
+.series-seasons { margin-top: 40px; border-top: 1px solid var(--line); padding-top: 28px; }
+.season + .season { margin-top: 34px; }
+.season-heading { font-size: 16px; margin: 0 0 12px; }
+.episode-list { list-style: none; padding: 0; margin: 0; }
+.episode-list li { border-bottom: 1px solid var(--line); }
+.episode-button { display: flex; align-items: baseline; gap: 16px; width: 100%; text-align: left; background: transparent; border: none; color: var(--text); padding: 14px 8px; border-radius: 6px; }
+.episode-button:hover, .episode-button:focus-visible { background: #edf1e7; }
+.episode-number { flex: none; min-width: 46px; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+.episode-title { flex: 1; min-width: 0; font-size: 13px; font-weight: 550; overflow-wrap: anywhere; }
+.episode-meta { flex: none; color: var(--muted); font-size: 12px; }
+
 .login-view { min-height: 100dvh; display: grid; grid-template-columns: minmax(320px, .85fr) 1.15fr; }
 .login-intro { background: var(--sidebar); color: var(--sidebar-text); display: flex; flex-direction: column; padding: 48px; }
 .login-intro .brand { align-self: flex-start; }

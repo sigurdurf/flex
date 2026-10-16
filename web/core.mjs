@@ -38,6 +38,22 @@ export function formatRuntime(ms) {
   return minutes >= 60 ? `${Math.floor(minutes / 60)}h ${minutes % 60}m` : `${minutes}m`;
 }
 
+/** Return pluralized season and episode labels, treating missing or negative counts as zero. */
+export function seriesCounts(series) {
+  const seasons = Math.max(0, Number(series?.season_count) || 0);
+  const episodes = Math.max(0, Number(series?.episode_count) || 0);
+  return {
+    seasons: seasons === 1 ? "1 season" : `${seasons} seasons`,
+    episodes: episodes === 1 ? "1 episode" : `${episodes} episodes`
+  };
+}
+
+/** Format a positive episode number with an E prefix and padding, or an em dash if unknown. */
+export function formatEpisodeNumber(number) {
+  const value = Math.max(0, Number(number) || 0);
+  return value > 0 ? "E" + String(value).padStart(2, "0") : "—";
+}
+
 export function progressPayload(playback, currentTime, duration, ended = false) {
   // Metadata and any initial seek must finish before a zero can overwrite a resume point.
   if (!playback?.ready || !Number.isFinite(currentTime) || currentTime < 0) return null;

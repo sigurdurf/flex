@@ -46,13 +46,16 @@ import coil.compose.AsyncImage
 import dev.flex.app.data.model.ContinueWatchingEntry
 import dev.flex.app.data.model.Library
 import dev.flex.app.data.model.MediaItem
+import dev.flex.app.data.model.Series
 import dev.flex.app.ui.MainViewModel
 
+/** Show library navigation, continue watching, and paginated items or TV series. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun LibraryScreen(
     viewModel: MainViewModel,
     onItemClick: (Long) -> Unit,
+    onSeriesClick: (Long) -> Unit,
     onResume: (ContinueWatchingEntry) -> Unit,
     onLogout: () -> Unit,
 ) {
@@ -109,22 +112,39 @@ fun LibraryScreen(
                 )
 
                 Box(modifier = Modifier.fillMaxSize()) {
-                    ItemGrid(
-                        items = viewModel.items,
-                        artworkFor = viewModel::artworkUrl,
-                        onItemClick = onItemClick,
-                        onLoadMore = viewModel::loadMoreItems,
-                        hasMore = viewModel.items.size.toLong() < viewModel.total,
-                        modifier = Modifier.fillMaxSize(),
-                    )
+                    val loading: Boolean
+                    val error: String?
+                    if (viewModel.seriesMode) {
+                        SeriesGrid(
+                            series = viewModel.series,
+                            artworkFor = viewModel::seriesArtworkUrl,
+                            onSeriesClick = onSeriesClick,
+                            onLoadMore = viewModel::loadMoreSeries,
+                            hasMore = viewModel.series.size.toLong() < viewModel.seriesTotal,
+                            modifier = Modifier.fillMaxSize(),
+                        )
+                        loading = viewModel.seriesLoading && viewModel.series.isEmpty()
+                        error = viewModel.seriesError
+                    } else {
+                        ItemGrid(
+                            items = viewModel.items,
+                            artworkFor = viewModel::artworkUrl,
+                            onItemClick = onItemClick,
+                            onLoadMore = viewModel::loadMoreItems,
+                            hasMore = viewModel.items.size.toLong() < viewModel.total,
+                            modifier = Modifier.fillMaxSize(),
+                        )
+                        loading = viewModel.itemsLoading && viewModel.items.isEmpty()
+                        error = viewModel.itemsError
+                    }
 
-                    if (viewModel.itemsLoading && viewModel.items.isEmpty()) {
+                    if (loading) {
                         CircularProgressIndicator(modifier = Modifier.align(Alignment.Center))
                     }
 
-                    viewModel.itemsError?.let { error ->
+                    error?.let { message ->
                         Text(
-                            text = error,
+                            text = message,
                             color = MaterialTheme.colorScheme.error,
                             modifier = Modifier
                                 .align(Alignment.Center)
@@ -281,6 +301,7 @@ private fun ContinueWatchingCard(
     }
 }
 
+/** Display item poster cards and a load-more control when additional pages exist. */
 @Composable
 private fun ItemGrid(
     items: List<MediaItem>,
@@ -300,7 +321,7 @@ private fun ItemGrid(
         items(items, key = { it.id }) { item ->
             PosterCard(
                 title = item.title,
-                year = item.year,
+                subtitle = item.year?.toString(),
                 artworkUrl = artworkFor(item),
                 onClick = { onItemClick(item.id) },
             )
@@ -308,27 +329,74 @@ private fun ItemGrid(
 
         if (hasMore) {
             item {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(16.dp),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Text(
-                        text = "Load more",
-                        color = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.clickable(onClick = onLoadMore),
-                    )
-                }
+                LoadMoreRow(onLoadMore)
             }
         }
     }
 }
 
+/** Display series poster cards that open season details, with optional pagination. */
+@Composable
+private fun SeriesGrid(
+    series: List<Series>,
+    artworkFor: (Series) -> String?,
+    onSeriesClick: (Long) -> Unit,
+    onLoadMore: () -> Unit,
+    hasMore: Boolean,
+    modifier: Modifier = Modifier,
+) {
+    LazyVerticalGrid(
+        columns = GridCells.Adaptive(minSize = 110.dp),
+        modifier = modifier,
+        contentPadding = androidx.compose.foundation.layout.PaddingValues(8.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        items(series, key = { it.id }) { show ->
+            PosterCard(
+                title = show.title,
+                subtitle = seasonLabel(show),
+                artworkUrl = artworkFor(show),
+                onClick = { onSeriesClick(show.id) },
+            )
+        }
+
+        if (hasMore) {
+            item {
+                LoadMoreRow(onLoadMore)
+            }
+        }
+    }
+}
+
+/** Format the season count with the series year when it is known. */
+private fun seasonLabel(series: Series): String {
+    val seasons = if (series.seasonCount == 1L) "1 season" else "${series.seasonCount} seasons"
+    return series.year?.let { "$it · $seasons" } ?: seasons
+}
+
+/** Show a centered control that invokes [onLoadMore] when selected. */
+@Composable
+private fun LoadMoreRow(onLoadMore: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(16.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            text = "Load more",
+            color = MaterialTheme.colorScheme.primary,
+            modifier = Modifier.clickable(onClick = onLoadMore),
+        )
+    }
+}
+
+/** Render a clickable poster with a fallback icon, title, and optional subtitle. */
 @Composable
 private fun PosterCard(
     title: String,
-    year: Int?,
+    subtitle: String?,
     artworkUrl: String?,
     onClick: () -> Unit,
 ) {
@@ -367,9 +435,9 @@ private fun PosterCard(
             overflow = TextOverflow.Ellipsis,
             style = MaterialTheme.typography.bodySmall,
         )
-        if (year != null) {
+        if (subtitle != null) {
             Text(
-                text = year.toString(),
+                text = subtitle,
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
