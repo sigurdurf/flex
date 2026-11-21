@@ -3,6 +3,7 @@
 use std::net::SocketAddr;
 use std::path::{Path as FsPath, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::body::Body;
 use axum::extract::{ConnectInfo, Path, Query, State};
@@ -755,6 +756,31 @@ async fn list_subtitles(
     Ok(Json(item.subtitles))
 }
 
+const SUBTITLE_FFMPEG_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Convert `input` to WebVTT. `map` selects one stream (`0:N`) when set.
+///
+/// The child is killed if it runs longer than [`SUBTITLE_FFMPEG_TIMEOUT`].
+async fn run_subtitle_ffmpeg(input: &FsPath, map: Option<&str>) -> Result<Vec<u8>, AppError> {
+    let mut command = tokio::process::Command::new("ffmpeg");
+    command
+        .kill_on_drop(true)
+        .args(["-v", "quiet", "-protocol_whitelist", "file", "-i"])
+        .arg(input);
+    if let Some(map) = map {
+        command.args(["-map", map]);
+    }
+    command.args(["-f", "webvtt", "-"]);
+    let output = tokio::time::timeout(SUBTITLE_FFMPEG_TIMEOUT, command.output())
+        .await
+        .map_err(|_| AppError::internal("ffmpeg timed out converting subtitle"))?
+        .map_err(|e| AppError::internal(format!("failed to run ffmpeg: {e}")))?;
+    if !output.status.success() {
+        return Err(AppError::internal("ffmpeg failed to convert subtitle"));
+    }
+    Ok(output.stdout)
+}
+
 fn vtt_response(bytes: Vec<u8>) -> Result<Response, AppError> {
     Response::builder()
         .status(StatusCode::OK)
@@ -787,17 +813,8 @@ async fn get_subtitle_track(
             })?;
             return vtt_response(bytes);
         }
-        let output = tokio::process::Command::new("ffmpeg")
-            .args(["-v", "quiet", "-protocol_whitelist", "file", "-i"])
-            .arg(&path)
-            .args(["-f", "webvtt", "-"])
-            .output()
-            .await
-            .map_err(|e| AppError::internal(format!("failed to run ffmpeg: {e}")))?;
-        if !output.status.success() {
-            return Err(AppError::internal("ffmpeg failed to convert subtitle"));
-        }
-        return vtt_response(output.stdout);
+        let bytes = run_subtitle_ffmpeg(&path, None).await?;
+        return vtt_response(bytes);
     }
 
     // Embedded subtitle track?
@@ -814,19 +831,9 @@ async fn get_subtitle_track(
             .map_err(|_| {
                 AppError::not_found(format!("subtitle track {track} not found for item {id}"))
             })?;
-    let output = tokio::process::Command::new("ffmpeg")
-        .args(["-v", "quiet", "-protocol_whitelist", "file", "-i"])
-        .arg(&media)
-        .args(["-map", &format!("0:{track}"), "-f", "webvtt", "-"])
-        .output()
-        .await
-        .map_err(|e| AppError::internal(format!("failed to run ffmpeg: {e}")))?;
-    if !output.status.success() {
-        return Err(AppError::internal(
-            "ffmpeg failed to extract embedded subtitle",
-        ));
-    }
-    vtt_response(output.stdout)
+    let map = format!("0:{track}");
+    let bytes = run_subtitle_ffmpeg(&media, Some(&map)).await?;
+    vtt_response(bytes)
 }
 
 #[cfg(test)]

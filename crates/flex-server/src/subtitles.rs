@@ -477,6 +477,12 @@ pub fn validate_download_url(link: &str) -> Result<(), SubtitleError> {
             "subtitle download link is missing a host".into(),
         ));
     }
+    let host_name = host.to_ascii_lowercase();
+    if host_name == "localhost" || host_name.ends_with(".localhost") {
+        return Err(SubtitleError::Upstream(
+            "subtitle download link host is not allowed".into(),
+        ));
+    }
     if let Ok(ip) = host.parse::<IpAddr>() {
         if ip_is_blocked(ip) {
             return Err(SubtitleError::Upstream(
@@ -1201,6 +1207,8 @@ mod tests {
         assert!(validate_download_url("https://1.1.1.1/sub.srt").is_ok());
         for bad in [
             "http://example.com/sub.srt",
+            "https://localhost/sub.srt",
+            "https://evil.localhost/sub.srt",
             "https://127.0.0.1/sub.srt",
             "https://10.1.2.3/sub.srt",
             "https://192.168.0.5/sub.srt",

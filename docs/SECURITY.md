@@ -40,14 +40,14 @@ The relevant adversaries are:
 3. **Stolen-token attackers** who obtain one device token. Mitigated by
    individually revocable tokens, per-device metadata (`last_seen_at`) and
    expiry.
-4. **Path-traversal / IDOR attackers** abusing item ids, subtitle language
-   tags, subtitle track numbers or artwork types. Mitigated by authorising
-   every stream/artwork/subtitle request per user, validating subtitle
-   `language` against the allowlist `^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8}){0,2}$`,
-   restricting downloaded sidecars to the media file's existing directory, and
-   canonicalising stream, artwork, and subtitle paths to verify they stay inside
-   the item's library root (symlinks resolving outside the library are neither
-   indexed nor served).
+4. **Path-traversal attackers** abusing subtitle language tags, subtitle
+   track numbers or artwork types. Mitigated by a bearer token, the subtitle
+   `language` allowlist `^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8}){0,2}$`, writing
+   sidecars only in the media file's existing directory, and canonicalising
+   stream, artwork, and subtitle paths so they stay inside the item's library
+   root. Symlinks that resolve outside the library are neither indexed nor
+   served. Any authenticated user can read any library item; Flex does not
+   grant access per item.
 5. **Network attackers** on the path to the server. Mitigated by TLS
    termination at the proxy.
 
@@ -125,9 +125,9 @@ a bearer token or a `?t=` token bound to that item. Admin-only routes (user
 management and `POST /api/v1/scan`) check `role == admin`.
 `POST /api/v1/playback/stop` only stops a session owned by the authenticated
 user (`404` if missing, `403` if owned by someone else). **Streams, artwork and
-subtitle endpoints are authorised per user** — a valid token from a non-admin
-account is necessary but the request is still checked against the item. Do not
-build custom URL schemes that bypass this check.
+subtitle endpoints require a bearer token.** Any authenticated user can open
+any item. The file that is opened must still canonicalize inside that item's
+library root. Do not build custom URL schemes that bypass this check.
 
 Ordinary (non-admin) clients do not receive server filesystem paths:
 `MediaItem.file_path` and `Library.path` are returned as empty strings while
@@ -146,7 +146,8 @@ download responses do not include the absolute sidecar path.
   `-protocol_whitelist file`. Media probing and subtitle conversion time out
   after 30 seconds.
 - **OpenSubtitles downloads:** File downloads require `https`, reject private,
-  loopback, and link-local hosts, and stop at 5 MiB.
+  loopback, and link-local addresses, reject `localhost`, and stop at 5 MiB.
+  A public hostname is not resolved before the request.
 - **CORS:** The server uses `CorsLayer::new()` and does not reflect arbitrary
   origins, blocking cross-origin browser access while keeping the same-origin
   web UI and native clients working.
