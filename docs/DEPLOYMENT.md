@@ -86,7 +86,10 @@ docker run --rm -p 127.0.0.1:8096:8096 \
 ```
 
 The image's default entrypoint is `/usr/local/bin/flex-server` with
-`CMD ["--config","/etc/flex/flex.toml"]`.
+`CMD ["--config","/etc/flex/flex.toml"]`. Because Flex defaults to binding
+`127.0.0.1` (loopback), a container that publishes port `8096` must opt in by
+setting `host = "0.0.0.0"` in the mounted `flex.toml` (while keeping the host
+publish restricted to `127.0.0.1:8096:8096`).
 
 To bootstrap the first admin in the container, pass the bootstrap environment
 variables once (create the account on the first run, then remove them):
@@ -131,12 +134,15 @@ docker compose logs -f flex-server
 ```
 
 Edit the compose file to point the media volume at your library path and, if
-desired, uncomment the config bind mount. Inside the container your config
+desired, uncomment the config bind mount. Flex binds to `127.0.0.1` by default,
+so a container that publishes the port must explicitly opt in by setting
+`host = "0.0.0.0"` in the mounted config. Inside the container your config
 should reference the mounted paths, for example:
 
 ```toml
-# When behind a reverse proxy on the host, use a private/loopback bind and
-# route to the container port. Publishing 8096 publicly is not recommended.
+# Opt-in override (Flex defaults to 127.0.0.1): required in a container that
+# publishes port 8096 to the host. Keep the host publish bound to 127.0.0.1
+# behind a reverse proxy; publishing 8096 publicly is not recommended.
 host = "0.0.0.0"
 port = 8096
 database = "/data/flex.db"

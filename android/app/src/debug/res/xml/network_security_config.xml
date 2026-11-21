@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+    <!--
+      Debug-only override: permits cleartext HTTP so debug builds can connect
+      to local/LAN Flex servers during development. Release builds inherit the
+      main source set, which requires HTTPS.
+    -->
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

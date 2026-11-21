@@ -87,7 +87,9 @@ Returns `PlaybackSession`:
 ```
 
 ### `POST /api/v1/playback/stop`
-Body: `StopPlaybackRequest`. Terminates the ffmpeg process if any. Returns `204`.
+Body: `StopPlaybackRequest`. Terminates the ffmpeg process if any and stops a
+session owned by the authenticated user. Returns `204`, `404` if the session is
+missing, or `403` if it belongs to another user.
 
 ### `GET /api/v1/playback/{session_id}/master.m3u8` and `/playback/{session_id}/{file}`
 Serve the HLS playlist, init segment and media segments. These are authorised by
@@ -141,9 +143,11 @@ title/year. Providers are configured server-side (e.g. OpenSubtitles API key).
 
 ### `POST /api/v1/subtitles/download`
 Body: `SubtitleDownloadRequest` `{ "provider", "id", "language"?, "item_id"? }`.
-When `item_id` is set the subtitle is converted to WebVTT and written next to
-the media file as a sidecar, then attached to the item. Returns
-`SubtitleDownloadResult`. Returns `400` if the provider is unknown, `404` if the
+`language` must match `^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8}){0,2}$`. When `item_id`
+is set the subtitle is converted to WebVTT and written inside the media file's
+existing directory as a sidecar, then attached to the item. Returns
+`SubtitleDownloadResult` (without the absolute server-local sidecar path).
+Returns `400` if the provider is unknown or `language` is invalid, `404` if the
 subtitle cannot be found, and `502` on an upstream provider error.
 
 ## Endpoints
@@ -164,8 +168,12 @@ Returns an array of `Library`:
 }]
 ```
 
+Non-admin callers receive `""` for `path` (the field is still present); admins
+receive the real server path.
+
 ### `POST /api/v1/scan`
-Walks every configured library, runs `ffprobe`, and upserts items.
+**Admin only** (`role == admin`). Walks every configured library, runs
+`ffprobe`, and upserts items.
 Returns `ScanReport`:
 ```json
 { "libraries": 2, "scanned": 128, "added": 3, "updated": 1, "removed": 0, "errors": [] }
@@ -280,4 +288,5 @@ Returns image bytes if series artwork exists, otherwise `404`. `type` defaults t
 ```
 
 Items that are not episodes omit `series_id`, `season` and `episode` (or set
-them to `null`).
+them to `null`). Non-admin callers receive `""` for `file_path` (the field is
+still present); admins receive the real server path.

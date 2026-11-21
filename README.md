@@ -149,10 +149,11 @@ Server configuration lives in a TOML file (`flex.toml` by default, overridable
 with `--config` or the `FLEX_CONFIG` environment variable). See
 [`config/flex.example.toml`](config/flex.example.toml) for every option,
 including `host`, `port`, `database`, optional `cache_dir`, and one
-`[[libraries]]` table per library.
+`[[libraries]]` table per library. By default Flex binds to `127.0.0.1`
+(loopback); set `host = "0.0.0.0"` on purpose if you want LAN access.
 
 ```toml
-host = "0.0.0.0"
+host = "127.0.0.1"
 port = 8096
 database = "./data/flex.db"
 
