@@ -266,7 +266,7 @@ pub fn parse_episode(path: &Path) -> EpisodeInfo {
 
 /// Look for artwork inside a directory (used for series, whose artwork lives in
 /// the show folder rather than beside a specific file).
-fn find_dir_artwork(dir: &Path, kind: &str) -> Option<String> {
+fn find_dir_artwork(dir: &Path, kind: &str, library_root: &Path) -> Option<String> {
     let names: &[&str] = match kind {
         "poster" => &[
             "poster.jpg",
@@ -287,7 +287,8 @@ fn find_dir_artwork(dir: &Path, kind: &str) -> Option<String> {
     };
     for name in names {
         let candidate = dir.join(name);
-        if candidate.is_file() {
+        // `is_file` follows symlinks. Only index a regular file inside the library.
+        if crate::paths::confined_file(library_root, &candidate).is_ok() {
             return Some(candidate.to_string_lossy().into_owned());
         }
     }
@@ -295,11 +296,11 @@ fn find_dir_artwork(dir: &Path, kind: &str) -> Option<String> {
 }
 
 /// Build the database row for the series an episode belongs to.
-fn series_row(library_id: i64, info: &EpisodeInfo) -> NewSeries {
+fn series_row(library_id: i64, info: &EpisodeInfo, library_root: &Path) -> NewSeries {
     let (poster, backdrop) = match info.show_dir.as_deref() {
         Some(dir) => (
-            find_dir_artwork(dir, "poster"),
-            find_dir_artwork(dir, "backdrop"),
+            find_dir_artwork(dir, "poster", library_root),
+            find_dir_artwork(dir, "backdrop", library_root),
         ),
         None => (None, None),
     };
@@ -338,7 +339,7 @@ fn extension_of(path: &Path) -> Option<String> {
 }
 
 /// Find sidecar subtitle files (`<stem>.srt`, `<stem>.<lang>.srt`, `.vtt`, ...).
-fn find_sidecars(video: &Path) -> Vec<SidecarTrack> {
+fn find_sidecars(video: &Path, library_root: &Path) -> Vec<SidecarTrack> {
     let Some(parent) = video.parent() else {
         return Vec::new();
     };
@@ -350,7 +351,8 @@ fn find_sidecars(video: &Path) -> Vec<SidecarTrack> {
     if let Ok(entries) = std::fs::read_dir(parent) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if !path.is_file() {
+            // `is_file` follows symlinks. Skip a link whose target leaves the library.
+            if crate::paths::confined_file(library_root, &path).is_err() {
                 continue;
             }
             let ext = extension_of(&path).unwrap_or_default();
@@ -393,7 +395,7 @@ fn find_sidecars(video: &Path) -> Vec<SidecarTrack> {
 }
 
 /// Look for a sidecar artwork file next to the video.
-fn find_artwork(video: &Path, kind: &str) -> Option<String> {
+fn find_artwork(video: &Path, kind: &str, library_root: &Path) -> Option<String> {
     let parent = video.parent()?;
     let stem = video.file_stem().and_then(|s| s.to_str()).unwrap_or("");
     let names: Vec<String> = match kind {
@@ -416,7 +418,7 @@ fn find_artwork(video: &Path, kind: &str) -> Option<String> {
     };
     for name in names {
         let candidate = parent.join(&name);
-        if candidate.is_file() {
+        if crate::paths::confined_file(library_root, &candidate).is_ok() {
             return Some(candidate.to_string_lossy().into_owned());
         }
     }
@@ -429,6 +431,7 @@ fn build_item(
     library_id: i64,
     kind: MediaKind,
     path: &Path,
+    library_root: &Path,
     probed: &Probed,
     episode: Option<&EpisodeInfo>,
 ) -> NewMediaItem {
@@ -468,9 +471,9 @@ fn build_item(
         container: probed.container.clone(),
         duration_ms: probed.duration_ms,
         streams: probed.streams.clone(),
-        sidecars: find_sidecars(path),
-        poster_path: find_artwork(path, "poster"),
-        backdrop_path: find_artwork(path, "backdrop"),
+        sidecars: find_sidecars(path, library_root),
+        poster_path: find_artwork(path, "poster", library_root),
+        backdrop_path: find_artwork(path, "backdrop", library_root),
         series_id: None,
         season: episode.map(|e| e.season),
         episode: episode.map(|e| e.episode),
@@ -486,15 +489,31 @@ pub async fn reindex_item(pool: &SqlitePool, id: i64) -> anyhow::Result<()> {
         .await?
         .ok_or_else(|| anyhow::anyhow!("media item {id} not found"))?;
     let path = PathBuf::from(&item.file_path);
-    let probed = probe::probe_file(&path).await?;
+    let library_root = PathBuf::from(
+        db::library_path(pool, item.library_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("library {} not found", item.library_id))?,
+    );
+    // Probe the canonical file so a symlink stored in the row cannot leave the library.
+    let canonical = crate::paths::confined_file(&library_root, &path)
+        .map_err(|_| anyhow::anyhow!("media file is not inside its library"))?;
+    let probed = probe::probe_file(&canonical).await?;
     let episode = if item.kind == MediaKind::Episode {
         Some(parse_episode(&path))
     } else {
         None
     };
-    let mut new_item = build_item(item.library_id, item.kind, &path, &probed, episode.as_ref());
+    let mut new_item = build_item(
+        item.library_id,
+        item.kind,
+        &path,
+        &library_root,
+        &probed,
+        episode.as_ref(),
+    );
     if let Some(info) = episode.as_ref() {
-        let (series_id, _) = db::upsert_series(pool, &series_row(item.library_id, info)).await?;
+        let (series_id, _) =
+            db::upsert_series(pool, &series_row(item.library_id, info, &library_root)).await?;
         new_item.series_id = Some(series_id);
     }
     db::upsert_media(pool, &new_item).await?;
@@ -566,6 +585,7 @@ async fn scan_library(
     report.scanned += files.len();
 
     let kind = media_kind_for(library.kind);
+    let library_root = PathBuf::from(&library.path);
     let probes = stream::iter(files.into_iter().map(|path| async move {
         let probed = probe::probe_file(&path).await;
         (path, probed)
@@ -585,9 +605,18 @@ async fn scan_library(
                 } else {
                     None
                 };
-                let mut item = build_item(library_id, kind, &path, &probed, episode.as_ref());
+                let mut item = build_item(
+                    library_id,
+                    kind,
+                    &path,
+                    &library_root,
+                    &probed,
+                    episode.as_ref(),
+                );
                 if let Some(info) = episode.as_ref() {
-                    match db::upsert_series(pool, &series_row(library_id, info)).await {
+                    match db::upsert_series(pool, &series_row(library_id, info, &library_root))
+                        .await
+                    {
                         Ok((series_id, _)) => item.series_id = Some(series_id),
                         Err(err) => report.errors.push(format!("{}: {err}", path.display())),
                     }

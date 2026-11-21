@@ -191,6 +191,15 @@ fn seconds(ms: u64) -> String {
     format!("{}.{:03}", ms / 1000, ms % 1000)
 }
 
+/// Append a library-file input. `-protocol_whitelist file` is an input option
+/// and must precede `-i`, and the path is a separate argument (no shell).
+fn push_file_input(args: &mut Vec<String>, input: &str) {
+    args.push("-protocol_whitelist".into());
+    args.push("file".into());
+    args.push("-i".into());
+    args.push(input.to_string());
+}
+
 /// Push the shared HLS output options onto `args`.
 fn push_hls(args: &mut Vec<String>, segment_type: &str, segment_name: &str) {
     args.extend(
@@ -238,7 +247,7 @@ pub fn remux_args(
         args.push("-ss".into());
         args.push(seconds(ms));
     }
-    args.extend(["-i".into(), input.to_string()]);
+    push_file_input(&mut args, input);
     args.extend(
         ["-map", "0:v:0", "-c:v", "copy", "-map", "0:a:0"]
             .iter()
@@ -316,7 +325,7 @@ pub fn transcode_args(
             args.push(hwaccel.clone());
         }
     }
-    args.extend(["-i".into(), input.to_string()]);
+    push_file_input(&mut args, input);
     args.extend(["-map".into(), "0:v:0".into(), "-map".into(), "0:a:0".into()]);
     args.extend(["-c:v".into(), encoder.to_string()]);
 
@@ -437,6 +446,28 @@ mod tests {
         assert_eq!(caps.h264_encoder, "libx264");
         assert_eq!(caps.hwaccel, None);
         assert!(caps.hw_encoders.is_empty());
+    }
+
+    fn assert_file_protocol(args: &[String]) {
+        let i = args.iter().position(|arg| arg == "-i").unwrap();
+        assert!(i >= 2, "{args:?}");
+        assert_eq!(args[i - 2], "-protocol_whitelist");
+        assert_eq!(args[i - 1], "file");
+    }
+
+    #[test]
+    fn file_inputs_are_limited_to_the_file_protocol() {
+        let remux = remux_args("/media/movie.mkv", "h264", true, None);
+        assert_file_protocol(&remux);
+        let transcode = transcode_args(
+            &software_caps(),
+            "/media/movie.mkv",
+            false,
+            None,
+            None,
+            None,
+        );
+        assert_file_protocol(&transcode);
     }
 
     #[test]

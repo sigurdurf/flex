@@ -1,6 +1,7 @@
 //! `ffprobe` invocation and mapping of its JSON output into protocol types.
 
 use std::path::Path;
+use std::time::Duration;
 
 use flex_protocol::{AudioStream, SubtitleStream, VideoStream};
 use serde::Deserialize;
@@ -174,21 +175,35 @@ fn map_probe(probe: Probe) -> Probed {
     out
 }
 
+/// How long a library probe may run before the child is killed.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// Run `ffprobe` on `path` and map the result into protocol stream types.
+///
+/// The input is opened with `-protocol_whitelist file` so a library path cannot
+/// be treated as a URL. The process is killed if it exceeds [`PROBE_TIMEOUT`].
 pub async fn probe_file(path: &Path) -> anyhow::Result<Probed> {
-    let output = tokio::process::Command::new("ffprobe")
-        .args([
-            "-v",
-            "quiet",
-            "-print_format",
-            "json",
-            "-show_format",
-            "-show_streams",
-        ])
-        .arg(path)
-        .output()
-        .await
-        .map_err(|e| anyhow::anyhow!("failed to run ffprobe: {e}"))?;
+    let output = tokio::time::timeout(
+        PROBE_TIMEOUT,
+        tokio::process::Command::new("ffprobe")
+            .kill_on_drop(true)
+            .args([
+                "-v",
+                "quiet",
+                "-print_format",
+                "json",
+                "-show_format",
+                "-show_streams",
+                "-protocol_whitelist",
+                "file",
+                "-i",
+            ])
+            .arg(path)
+            .output(),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("ffprobe timed out"))?
+    .map_err(|e| anyhow::anyhow!("failed to run ffprobe: {e}"))?;
 
     if !output.status.success() {
         anyhow::bail!(

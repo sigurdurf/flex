@@ -16,8 +16,8 @@ pub const API_VERSION: &str = "v1";
 /// Default TCP port used by the headless server.
 pub const DEFAULT_PORT: u16 = 8096;
 
-/// Default address the server binds to when unset.
-pub const DEFAULT_HOST: &str = "0.0.0.0";
+/// Default address the server binds to when unset (loopback only).
+pub const DEFAULT_HOST: &str = "127.0.0.1";
 
 /// URL of the health endpoint.
 pub fn health_path() -> String {
@@ -413,8 +413,8 @@ pub struct SubtitleDownloadRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubtitleDownloadResult {
     pub item_id: i64,
-    /// Server-local path of the installed sidecar (present when `item_id` was
-    /// supplied and the location was writable).
+    /// Optional sidecar path field retained for wire compatibility; server
+    /// responses do not include the absolute server-local sidecar path.
     #[serde(default)]
     pub path: Option<String>,
     pub language: String,
@@ -447,7 +447,8 @@ pub enum MediaKind {
 pub struct Library {
     pub id: i64,
     pub name: String,
-    /// Absolute filesystem path that was scanned. Server-local only.
+    /// Absolute filesystem path that was scanned. Server-local only;
+    /// non-admins receive an empty string.
     pub path: String,
     pub kind: LibraryKind,
     /// Unix timestamp (seconds) the library was registered.
@@ -500,8 +501,8 @@ pub struct MediaItem {
     pub sort_title: String,
     pub year: Option<i32>,
     pub overview: Option<String>,
-    /// Absolute server-local path to the file. Stream clients should use
-    /// [`stream_path`] instead.
+    /// Absolute server-local path to the file. Non-admins receive an empty
+    /// string. Stream clients should use [`stream_path`] instead.
     pub file_path: String,
     pub file_size: u64,
     pub container: Option<String>,

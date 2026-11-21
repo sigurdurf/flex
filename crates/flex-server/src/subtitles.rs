@@ -7,10 +7,12 @@
 //! contract.
 
 use std::future::Future;
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{RawQuery, State};
@@ -32,6 +34,12 @@ use crate::scanner;
 pub const OPENSUBTITLES_API_BASE: &str = "https://api.opensubtitles.com/api/v1";
 /// Default language used when neither the request nor the provider names one.
 pub const DEFAULT_LANGUAGE: &str = "und";
+
+/// Largest subtitle body accepted from a provider download link.
+const MAX_SUBTITLE_DOWNLOAD_BYTES: usize = 5 * 1024 * 1024;
+
+/// How long subtitle conversion may run before ffmpeg is killed.
+const SUBTITLE_CONVERT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// A future returned by [`SubtitleProvider`] methods.
 pub type ProviderFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -231,7 +239,11 @@ impl SubtitleProvider for MockProvider {
 
 /// OpenSubtitles.com REST API provider.
 pub struct OpenSubtitlesProvider {
+    /// Client used for the OpenSubtitles API. Download links use [`Self::download_client`].
     client: reqwest::Client,
+    /// File fetch client. Redirects are re-checked so a public URL cannot bounce
+    /// to a private address, and non-HTTPS targets are refused.
+    download_client: reqwest::Client,
     api_key: String,
     /// Optional account credentials, used to obtain a download token.
     credentials: Option<(String, String)>,
@@ -246,10 +258,8 @@ impl OpenSubtitlesProvider {
         username: Option<String>,
         password: Option<String>,
     ) -> Result<Self, SubtitleError> {
-        let client = reqwest::Client::builder()
-            .user_agent(concat!("flex-server/", env!("CARGO_PKG_VERSION")))
-            .build()
-            .map_err(|e| SubtitleError::Internal(format!("failed to build HTTP client: {e}")))?;
+        let client = http_client(reqwest::redirect::Policy::default())?;
+        let download_client = http_client(download_redirect_policy())?;
         let credentials = match (username, password) {
             (Some(username), Some(password)) if !username.trim().is_empty() => {
                 Some((username, password))
@@ -258,6 +268,7 @@ impl OpenSubtitlesProvider {
         };
         Ok(Self {
             client,
+            download_client,
             api_key: api_key.into(),
             credentials,
             token: tokio::sync::Mutex::new(None),
@@ -397,6 +408,7 @@ impl OpenSubtitlesProvider {
         let link = download.link.ok_or_else(|| {
             SubtitleError::Upstream("OpenSubtitles returned no download link".into())
         })?;
+        validate_download_url(&link)?;
 
         let format = download
             .file_name
@@ -405,20 +417,124 @@ impl OpenSubtitlesProvider {
             .and_then(SubtitleFormat::from_extension)
             .unwrap_or(SubtitleFormat::Srt);
 
-        let bytes = self
-            .client
+        let mut response = self
+            .download_client
             .get(&link)
             .send()
             .await
             .map_err(|e| SubtitleError::Upstream(e.to_string()))?
             .error_for_status()
-            .map_err(|e| SubtitleError::Upstream(e.to_string()))?
-            .bytes()
-            .await
             .map_err(|e| SubtitleError::Upstream(e.to_string()))?;
+        let bytes = read_limited_body(&mut response, MAX_SUBTITLE_DOWNLOAD_BYTES).await?;
 
-        Ok(SubtitlePayload::new(bytes.to_vec(), format))
+        Ok(SubtitlePayload::new(bytes, format))
     }
+}
+
+fn http_client(redirects: reqwest::redirect::Policy) -> Result<reqwest::Client, SubtitleError> {
+    reqwest::Client::builder()
+        .user_agent(concat!("flex-server/", env!("CARGO_PKG_VERSION")))
+        .redirect(redirects)
+        .build()
+        .map_err(|e| SubtitleError::Internal(format!("failed to build HTTP client: {e}")))
+}
+
+/// Redirect policy for subtitle file fetches. Each hop must pass [`validate_download_url`].
+fn download_redirect_policy() -> reqwest::redirect::Policy {
+    reqwest::redirect::Policy::custom(|attempt| {
+        if attempt.previous().len() >= 5 {
+            return attempt.error("too many subtitle download redirects");
+        }
+        if let Err(err) = validate_download_url(attempt.url().as_str()) {
+            return attempt.error(err.to_string());
+        }
+        attempt.follow()
+    })
+}
+
+/// Accept an `https` URL whose host is a domain or a public IP.
+///
+/// Loopback, private, link-local, and unspecified addresses are rejected.
+/// A hostname is not resolved here: a domain is allowed.
+pub fn validate_download_url(link: &str) -> Result<(), SubtitleError> {
+    let url = reqwest::Url::parse(link)
+        .map_err(|_| SubtitleError::Upstream("invalid subtitle download link".into()))?;
+    if url.scheme() != "https" {
+        return Err(SubtitleError::Upstream(
+            "subtitle download link must use https".into(),
+        ));
+    }
+    let host = url.host_str().ok_or_else(|| {
+        SubtitleError::Upstream("subtitle download link is missing a host".into())
+    })?;
+    // `host_str` keeps the brackets around an IPv6 address.
+    let host = host
+        .strip_prefix('[')
+        .and_then(|host| host.strip_suffix(']'))
+        .unwrap_or(host);
+    if host.is_empty() {
+        return Err(SubtitleError::Upstream(
+            "subtitle download link is missing a host".into(),
+        ));
+    }
+    let host_name = host.to_ascii_lowercase();
+    if host_name == "localhost" || host_name.ends_with(".localhost") {
+        return Err(SubtitleError::Upstream(
+            "subtitle download link host is not allowed".into(),
+        ));
+    }
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        if ip_is_blocked(ip) {
+            return Err(SubtitleError::Upstream(
+                "subtitle download link host is not allowed".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn ip_is_blocked(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => ipv4_is_blocked(v4),
+        IpAddr::V6(v6) => {
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return ipv4_is_blocked(v4);
+            }
+            if v6.is_loopback() || v6.is_unspecified() {
+                return true;
+            }
+            let first = v6.segments()[0];
+            // Unique-local (fc00::/7) is the IPv6 private range. fe80::/10 is link-local.
+            let unique_local = first & 0xfe00 == 0xfc00;
+            let link_local = first & 0xffc0 == 0xfe80;
+            unique_local || link_local
+        }
+    }
+}
+
+fn ipv4_is_blocked(ip: std::net::Ipv4Addr) -> bool {
+    ip.is_loopback() || ip.is_private() || ip.is_link_local() || ip.is_unspecified()
+}
+
+/// Read `response` in chunks and stop at `limit` bytes.
+async fn read_limited_body(
+    response: &mut reqwest::Response,
+    limit: usize,
+) -> Result<Vec<u8>, SubtitleError> {
+    let mut body = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|e| SubtitleError::Upstream(e.to_string()))?
+    {
+        if chunk.len() > limit || body.len() > limit - chunk.len() {
+            return Err(SubtitleError::Upstream(
+                "subtitle download exceeds size limit".into(),
+            ));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
 }
 
 impl SubtitleProvider for OpenSubtitlesProvider {
@@ -633,13 +749,45 @@ pub fn sidecar_path(media: &Path, language: &str) -> PathBuf {
     parent.join(format!("{stem}.{language}.vtt"))
 }
 
-/// Normalise a language tag, falling back to [`DEFAULT_LANGUAGE`].
-pub fn normalize_language(language: Option<&str>) -> String {
-    language
-        .map(str::trim)
-        .filter(|l| !l.is_empty())
-        .unwrap_or(DEFAULT_LANGUAGE)
-        .to_string()
+/// Normalise a language tag, falling back to [`DEFAULT_LANGUAGE`] when empty.
+///
+/// Accepted tags match `^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8}){0,2}$`. Anything else
+/// is a 400 so the tag cannot be interpolated into a filesystem path.
+pub fn normalize_language(language: Option<&str>) -> Result<String, AppError> {
+    let Some(tag) = language.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(DEFAULT_LANGUAGE.to_string());
+    };
+    if is_language_tag(tag) {
+        Ok(tag.to_string())
+    } else {
+        Err(AppError::bad_request("invalid subtitle language"))
+    }
+}
+
+fn is_language_tag(tag: &str) -> bool {
+    let mut parts = tag.split('-');
+    let Some(primary) = parts.next() else {
+        return false;
+    };
+    if !is_ascii_alpha(primary) || !(2..=3).contains(&primary.len()) {
+        return false;
+    }
+    let mut extras = 0usize;
+    for part in parts {
+        extras += 1;
+        if extras > 2 || !is_ascii_alnum(part) || !(2..=8).contains(&part.len()) {
+            return false;
+        }
+    }
+    true
+}
+
+fn is_ascii_alpha(value: &str) -> bool {
+    value.bytes().all(|byte| byte.is_ascii_alphabetic())
+}
+
+fn is_ascii_alnum(value: &str) -> bool {
+    value.bytes().all(|byte| byte.is_ascii_alphanumeric())
 }
 
 /// Convert arbitrary subtitle bytes to WebVTT.
@@ -664,16 +812,21 @@ pub async fn convert_to_vtt(
         .await
         .map_err(|e| SubtitleError::Internal(format!("failed to write temp subtitle: {e}")))?;
 
-    let output = tokio::process::Command::new("ffmpeg")
-        .args(["-v", "quiet", "-i"])
-        .arg(&tmp)
-        .args(["-f", "webvtt", "-"])
-        .output()
-        .await;
+    let output = tokio::time::timeout(
+        SUBTITLE_CONVERT_TIMEOUT,
+        tokio::process::Command::new("ffmpeg")
+            .kill_on_drop(true)
+            .args(["-v", "quiet", "-protocol_whitelist", "file", "-i"])
+            .arg(&tmp)
+            .args(["-f", "webvtt", "-"])
+            .output(),
+    )
+    .await;
     let _ = tokio::fs::remove_file(&tmp).await;
 
-    let output =
-        output.map_err(|e| SubtitleError::Internal(format!("failed to run ffmpeg: {e}")))?;
+    let output = output
+        .map_err(|_| SubtitleError::Internal("ffmpeg timed out converting subtitle".into()))?
+        .map_err(|e| SubtitleError::Internal(format!("failed to run ffmpeg: {e}")))?;
     if !output.status.success() {
         return Err(SubtitleError::Internal(
             "ffmpeg failed to convert subtitle to WebVTT".to_string(),
@@ -682,11 +835,10 @@ pub async fn convert_to_vtt(
     Ok(output.stdout)
 }
 
-/// Write a WebVTT file to `path`, creating parent directories as needed.
+/// Write a WebVTT file to `path`.
+///
+/// The parent directory must already exist. This does not create directories.
 pub async fn write_sidecar(path: &Path, vtt: &[u8]) -> std::io::Result<()> {
-    if let Some(parent) = path.parent() {
-        tokio::fs::create_dir_all(parent).await?;
-    }
     tokio::fs::write(path, vtt).await
 }
 
@@ -859,7 +1011,30 @@ pub async fn download(
         AppError::bad_request(format!("unknown subtitle provider {:?}", request.provider))
     })?;
 
-    let language = normalize_language(request.language.as_deref());
+    let language = normalize_language(request.language.as_deref())?;
+
+    // Resolve the sidecar location before talking to the provider so a bad
+    // path is a failure and never a directory we create.
+    let mut item_id = 0i64;
+    let target = if let Some(id) = request.item_id {
+        item_id = id;
+        let item = db::get_item(&state.pool, id)
+            .await?
+            .ok_or_else(|| AppError::not_found(format!("media item {id} not found")))?;
+        let root = db::library_path(&state.pool, item.library_id)
+            .await?
+            .ok_or_else(|| AppError::not_found(format!("media item {id} not found")))?;
+        let target = sidecar_path(Path::new(&item.file_path), &language);
+        let parent = target
+            .parent()
+            .ok_or_else(|| AppError::internal("could not write subtitle sidecar"))?;
+        crate::paths::canonicalize_within(Path::new(&root), parent)
+            .map_err(|_| AppError::internal("could not write subtitle sidecar"))?;
+        Some(target)
+    } else {
+        None
+    };
+
     let payload = provider
         .download(&request.id, Some(&language))
         .await
@@ -868,42 +1043,28 @@ pub async fn download(
         .await
         .map_err(AppError::from)?;
 
-    let mut installed_path: Option<String> = None;
-    let mut item_id = 0i64;
-
-    if let Some(id) = request.item_id {
-        item_id = id;
-        let item = db::get_item(&state.pool, id)
-            .await?
-            .ok_or_else(|| AppError::not_found(format!("media item {id} not found")))?;
-
-        let target = sidecar_path(Path::new(&item.file_path), &language);
-        match write_sidecar(&target, &vtt).await {
-            Ok(()) => {
-                installed_path = Some(target.to_string_lossy().into_owned());
-                match scanner::reindex_item(&state.pool, id).await {
-                    Ok(()) => {
-                        tracing::info!(item_id = id, path = %target.display(), "installed subtitle sidecar")
-                    }
-                    Err(err) => tracing::warn!(
-                        item_id = id,
-                        error = %err,
-                        "subtitle installed but re-indexing the item failed"
-                    ),
-                }
-            }
-            Err(err) => tracing::warn!(
-                item_id = id,
-                path = %target.display(),
+    if let Some(target) = target {
+        write_sidecar(&target, &vtt).await.map_err(|err| {
+            tracing::warn!(
+                item_id,
                 error = %err,
                 "media directory not writable; subtitle not installed"
+            );
+            AppError::internal("could not write subtitle sidecar")
+        })?;
+        match scanner::reindex_item(&state.pool, item_id).await {
+            Ok(()) => tracing::info!(item_id, "installed subtitle sidecar"),
+            Err(err) => tracing::warn!(
+                item_id,
+                error = %err,
+                "subtitle installed but re-indexing the item failed"
             ),
         }
     }
 
     Ok(Json(SubtitleDownloadResult {
         item_id,
-        path: installed_path,
+        path: None,
         language,
         format: "vtt".to_string(),
     }))
@@ -1023,9 +1184,51 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(params.normalized_languages(), vec!["en", "fr", "de"]);
-        assert_eq!(normalize_language(None), "und");
-        assert_eq!(normalize_language(Some("  ")), "und");
-        assert_eq!(normalize_language(Some("en")), "en");
+        assert_eq!(normalize_language(None).unwrap(), "und");
+        assert_eq!(normalize_language(Some("  ")).unwrap(), "und");
+        assert_eq!(normalize_language(Some("en")).unwrap(), "en");
+    }
+
+    #[test]
+    fn rejects_language_tags_that_are_paths() {
+        for bad in ["../../tmp/pwned", "/tmp/x", "en/../../x", ".."] {
+            assert!(
+                matches!(normalize_language(Some(bad)), Err(AppError::BadRequest(_))),
+                "{bad}"
+            );
+        }
+        assert_eq!(normalize_language(Some("en")).unwrap(), "en");
+        assert_eq!(normalize_language(Some("pt-BR")).unwrap(), "pt-BR");
+    }
+
+    #[test]
+    fn download_link_must_be_public_https() {
+        assert!(validate_download_url("https://example.com/sub.srt").is_ok());
+        assert!(validate_download_url("https://1.1.1.1/sub.srt").is_ok());
+        for bad in [
+            "http://example.com/sub.srt",
+            "https://localhost/sub.srt",
+            "https://evil.localhost/sub.srt",
+            "https://127.0.0.1/sub.srt",
+            "https://10.1.2.3/sub.srt",
+            "https://192.168.0.5/sub.srt",
+            "https://172.16.0.1/sub.srt",
+            "https://169.254.1.1/sub.srt",
+            "https://0.0.0.0/sub.srt",
+            "https://[::1]/sub.srt",
+            "https://[::]/sub.srt",
+            "https://[fc00::1]/sub.srt",
+            "https://[fe80::1]/sub.srt",
+            "https://[::ffff:127.0.0.1]/sub.srt",
+            "https://2130706433/sub.srt",
+            "https://0x7f000001/sub.srt",
+            "https://127.1/sub.srt",
+            "file:///etc/passwd",
+            "https://",
+            "https:///",
+        ] {
+            assert!(validate_download_url(bad).is_err(), "{bad}");
+        }
     }
 
     #[test]
@@ -1290,10 +1493,43 @@ mod tests {
         assert_eq!(result.item_id, id);
         assert_eq!(result.language, "en");
         assert_eq!(result.format, "vtt");
-        let path = result.path.expect("sidecar should be installed");
-        assert!(path.ends_with("Blade Runner (1982).en.vtt"));
-        let bytes = tokio::fs::read(&path).await.unwrap();
+        assert!(result.path.is_none());
+        let sidecar = sidecar_path(&media, "en");
+        let bytes = tokio::fs::read(&sidecar).await.unwrap();
         assert!(String::from_utf8_lossy(&bytes).starts_with("WEBVTT"));
+        assert_eq!(sidecar.file_name().unwrap(), "Blade Runner (1982).en.vtt");
+    }
+
+    #[tokio::test]
+    async fn download_handler_rejects_path_language() {
+        let state = test_state().await;
+        let request = SubtitleDownloadRequest {
+            provider: "mock".to_string(),
+            id: "mock-1".to_string(),
+            language: Some("../../tmp/pwned".to_string()),
+            item_id: None,
+        };
+        let result = download(dummy_auth(), State(state), Ok(Json(request))).await;
+        assert!(matches!(result, Err(AppError::BadRequest(_))));
+    }
+
+    #[tokio::test]
+    async fn download_handler_missing_parent_does_not_create_directories() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("gone");
+        let media = missing.join("Movie.mkv");
+        let state = test_state().await;
+        let id = seed_item(&state, &media).await;
+        let request = SubtitleDownloadRequest {
+            provider: "mock".to_string(),
+            id: "mock-1".to_string(),
+            language: Some("en".to_string()),
+            item_id: Some(id),
+        };
+        let result = download(dummy_auth(), State(state), Ok(Json(request))).await;
+        assert!(result.is_err());
+        assert!(!missing.exists());
+        assert!(!missing.join("Movie.en.vtt").exists());
     }
 
     #[tokio::test]

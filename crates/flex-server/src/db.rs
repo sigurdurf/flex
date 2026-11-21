@@ -305,6 +305,14 @@ pub async fn upsert_library(
     Ok(result.last_insert_rowid())
 }
 
+/// Filesystem root registered for a library, if the row exists.
+pub async fn library_path(pool: &SqlitePool, id: i64) -> Result<Option<String>, sqlx::Error> {
+    sqlx::query_scalar("SELECT path FROM libraries WHERE id = ?")
+        .bind(id)
+        .fetch_optional(pool)
+        .await
+}
+
 /// List all libraries with their current item counts.
 pub async fn list_libraries(pool: &SqlitePool) -> Result<Vec<Library>, sqlx::Error> {
     let rows = sqlx::query(
@@ -460,12 +468,19 @@ pub async fn get_item(pool: &SqlitePool, id: i64) -> Result<Option<MediaItem>, s
 pub async fn get_artwork_paths(
     pool: &SqlitePool,
     id: i64,
-) -> Result<Option<(Option<String>, Option<String>)>, sqlx::Error> {
-    let row = sqlx::query("SELECT poster_path, backdrop_path FROM media_items WHERE id = ?")
-        .bind(id)
-        .fetch_optional(pool)
-        .await?;
-    Ok(row.map(|r| (r.get("poster_path"), r.get("backdrop_path"))))
+) -> Result<Option<(i64, Option<String>, Option<String>)>, sqlx::Error> {
+    let row =
+        sqlx::query("SELECT library_id, poster_path, backdrop_path FROM media_items WHERE id = ?")
+            .bind(id)
+            .fetch_optional(pool)
+            .await?;
+    Ok(row.map(|r| {
+        (
+            r.get("library_id"),
+            r.get("poster_path"),
+            r.get("backdrop_path"),
+        )
+    }))
 }
 
 /// Fetch the sidecar subtitle tracks for an item.
@@ -645,12 +660,18 @@ pub async fn get_series(pool: &SqlitePool, id: i64) -> Result<Option<Series>, sq
 pub async fn get_series_artwork_paths(
     pool: &SqlitePool,
     id: i64,
-) -> Result<Option<(Option<String>, Option<String>)>, sqlx::Error> {
-    let row = sqlx::query("SELECT poster_path, backdrop_path FROM series WHERE id = ?")
+) -> Result<Option<(i64, Option<String>, Option<String>)>, sqlx::Error> {
+    let row = sqlx::query("SELECT library_id, poster_path, backdrop_path FROM series WHERE id = ?")
         .bind(id)
         .fetch_optional(pool)
         .await?;
-    Ok(row.map(|r| (r.get("poster_path"), r.get("backdrop_path"))))
+    Ok(row.map(|r| {
+        (
+            r.get("library_id"),
+            r.get("poster_path"),
+            r.get("backdrop_path"),
+        )
+    }))
 }
 
 /// Query series with filtering, sorting and pagination.

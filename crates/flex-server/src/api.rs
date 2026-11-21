@@ -1,8 +1,9 @@
 //! HTTP API: routes, handlers and byte-range streaming.
 
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path as FsPath, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::body::Body;
 use axum::extract::{ConnectInfo, Path, Query, State};
@@ -89,7 +90,7 @@ pub fn router(state: AppState) -> Router {
     }
 
     router
-        .layer(CorsLayer::permissive())
+        .layer(CorsLayer::new())
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }
@@ -165,10 +166,15 @@ async fn login(
     }
 
     let found = db::find_user_by_username(&state.pool, username).await?;
-    let valid = found
-        .as_ref()
-        .map(|(_, hash)| auth::verify_password(&request.password, hash))
-        .unwrap_or(false);
+    let valid = match found.as_ref() {
+        Some((_, hash)) => auth::verify_password(&request.password, hash),
+        None => {
+            // Unknown usernames still pay for Argon2. The result cannot succeed.
+            let dummy_ok = auth::verify_password(&request.password, auth::DUMMY_PASSWORD_HASH);
+            let _ = std::hint::black_box(dummy_ok);
+            false
+        }
+    };
     if !valid {
         state.rate_limiter.record_failure(key);
         return Err(AppError::unauthorized("invalid username or password"));
@@ -281,32 +287,56 @@ async fn create_user(
     Ok(Json(user))
 }
 
-async fn list_libraries(State(state): State<AppState>) -> Result<Json<Vec<Library>>, AppError> {
-    let libraries = db::list_libraries(&state.pool).await?;
+fn redact_item(item: &mut MediaItem, admin: bool) {
+    if !admin {
+        item.file_path.clear();
+    }
+}
+
+async fn list_libraries(
+    auth: AuthUser,
+    State(state): State<AppState>,
+) -> Result<Json<Vec<Library>>, AppError> {
+    let mut libraries = db::list_libraries(&state.pool).await?;
+    if !auth.is_admin() {
+        for library in &mut libraries {
+            library.path.clear();
+        }
+    }
     Ok(Json(libraries))
 }
 
-async fn trigger_scan(State(state): State<AppState>) -> Result<Json<ScanReport>, AppError> {
+async fn trigger_scan(
+    _admin: AdminUser,
+    State(state): State<AppState>,
+) -> Result<Json<ScanReport>, AppError> {
     let report = scanner::scan(&state.pool, &state.config).await;
     Ok(Json(report))
 }
 
 async fn list_items(
+    auth: AuthUser,
     State(state): State<AppState>,
     Query(query): Query<ItemQuery>,
 ) -> Result<Json<Page<MediaItem>>, AppError> {
-    let page = db::list_items(&state.pool, &query).await?;
+    let mut page = db::list_items(&state.pool, &query).await?;
+    let admin = auth.is_admin();
+    for item in &mut page.items {
+        redact_item(item, admin);
+    }
     Ok(Json(page))
 }
 
 async fn get_item(
+    auth: AuthUser,
     State(state): State<AppState>,
     Path(id): Path<i64>,
 ) -> Result<Json<MediaItem>, AppError> {
-    db::get_item(&state.pool, id)
+    let mut item = db::get_item(&state.pool, id)
         .await?
-        .map(Json)
-        .ok_or_else(|| AppError::not_found(format!("media item {id} not found")))
+        .ok_or_else(|| AppError::not_found(format!("media item {id} not found")))?;
+    redact_item(&mut item, auth.is_admin());
+    Ok(Json(item))
 }
 
 /// Return a page of series matching the supplied browse filters.
@@ -320,13 +350,21 @@ async fn list_series(
 
 /// Return series metadata and season groups, or a not-found error for an unknown ID.
 async fn get_series(
+    auth: AuthUser,
     State(state): State<AppState>,
     Path(id): Path<i64>,
 ) -> Result<Json<SeriesDetail>, AppError> {
-    db::get_series_detail(&state.pool, id)
+    let mut detail = db::get_series_detail(&state.pool, id)
         .await?
-        .map(Json)
-        .ok_or_else(|| AppError::not_found(format!("series {id} not found")))
+        .ok_or_else(|| AppError::not_found(format!("series {id} not found")))?;
+    if !auth.is_admin() {
+        for season in &mut detail.seasons {
+            for episode in &mut season.episodes {
+                episode.file_path.clear();
+            }
+        }
+    }
+    Ok(Json(detail))
 }
 
 /// Serve a series' poster or backdrop, mirroring the item artwork handler.
@@ -336,7 +374,7 @@ async fn series_artwork(
     Query(query): Query<ArtworkQuery>,
 ) -> Result<Response, AppError> {
     let kind = query.kind.as_deref().unwrap_or("poster");
-    let (poster, backdrop) = db::get_series_artwork_paths(&state.pool, id)
+    let (library_id, poster, backdrop) = db::get_series_artwork_paths(&state.pool, id)
         .await?
         .ok_or_else(|| AppError::not_found(format!("series {id} not found")))?;
 
@@ -354,7 +392,10 @@ async fn series_artwork(
         AppError::not_found(format!("no {kind} artwork available for series {id}"))
     })?;
 
-    let bytes = tokio::fs::read(&path_str)
+    let path = crate::paths::library_file(&state.pool, library_id, FsPath::new(&path_str))
+        .await
+        .map_err(|_| AppError::not_found(format!("artwork file for series {id} is unavailable")))?;
+    let bytes = tokio::fs::read(&path)
         .await
         .map_err(|_| AppError::not_found(format!("artwork file for series {id} is unavailable")))?;
     let content_type = image_content_type(&path_str);
@@ -382,7 +423,12 @@ async fn continue_watching(
 ) -> Result<Json<Page<ContinueWatchingEntry>>, AppError> {
     let limit = query.limit.unwrap_or(20).clamp(1, 100);
     let offset = query.offset.unwrap_or(0).max(0);
-    let page = db::list_continue_watching(&state.pool, auth.user.id, limit, offset).await?;
+    let mut page = db::list_continue_watching(&state.pool, auth.user.id, limit, offset).await?;
+    if !auth.is_admin() {
+        for entry in &mut page.items {
+            entry.item.file_path.clear();
+        }
+    }
     Ok(Json(page))
 }
 
@@ -565,9 +611,13 @@ pub(crate) async fn file_body(
     start: u64,
     len: Option<u64>,
 ) -> Result<Body, AppError> {
-    let mut file = tokio::fs::File::open(path).await?;
+    let mut file = tokio::fs::File::open(path)
+        .await
+        .map_err(|_| AppError::not_found("file is unavailable"))?;
     if start > 0 {
-        file.seek(SeekFrom::Start(start)).await?;
+        file.seek(SeekFrom::Start(start))
+            .await
+            .map_err(|_| AppError::not_found("file is unavailable"))?;
     }
     match len {
         Some(len) => Ok(Body::from_stream(ReaderStream::new(file.take(len)))),
@@ -593,7 +643,10 @@ async fn stream(
         .await?
         .ok_or_else(|| AppError::not_found(format!("media item {id} not found")))?;
 
-    let path = PathBuf::from(&item.file_path);
+    let path =
+        crate::paths::library_file(&state.pool, item.library_id, FsPath::new(&item.file_path))
+            .await
+            .map_err(|_| AppError::not_found(format!("file for item {id} is unavailable")))?;
     let metadata = tokio::fs::metadata(&path)
         .await
         .map_err(|_| AppError::not_found(format!("file for item {id} is unavailable")))?;
@@ -660,7 +713,7 @@ async fn artwork(
     Query(query): Query<ArtworkQuery>,
 ) -> Result<Response, AppError> {
     let kind = query.kind.as_deref().unwrap_or("poster");
-    let (poster, backdrop) = db::get_artwork_paths(&state.pool, id)
+    let (library_id, poster, backdrop) = db::get_artwork_paths(&state.pool, id)
         .await?
         .ok_or_else(|| AppError::not_found(format!("media item {id} not found")))?;
 
@@ -677,7 +730,10 @@ async fn artwork(
     let path_str = path_str
         .ok_or_else(|| AppError::not_found(format!("no {kind} artwork available for item {id}")))?;
 
-    let bytes = tokio::fs::read(&path_str)
+    let path = crate::paths::library_file(&state.pool, library_id, FsPath::new(&path_str))
+        .await
+        .map_err(|_| AppError::not_found(format!("artwork file for item {id} is unavailable")))?;
+    let bytes = tokio::fs::read(&path)
         .await
         .map_err(|_| AppError::not_found(format!("artwork file for item {id} is unavailable")))?;
     let content_type = image_content_type(&path_str);
@@ -700,6 +756,31 @@ async fn list_subtitles(
     Ok(Json(item.subtitles))
 }
 
+const SUBTITLE_FFMPEG_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Convert `input` to WebVTT. `map` selects one stream (`0:N`) when set.
+///
+/// The child is killed if it runs longer than [`SUBTITLE_FFMPEG_TIMEOUT`].
+async fn run_subtitle_ffmpeg(input: &FsPath, map: Option<&str>) -> Result<Vec<u8>, AppError> {
+    let mut command = tokio::process::Command::new("ffmpeg");
+    command
+        .kill_on_drop(true)
+        .args(["-v", "quiet", "-protocol_whitelist", "file", "-i"])
+        .arg(input);
+    if let Some(map) = map {
+        command.args(["-map", map]);
+    }
+    command.args(["-f", "webvtt", "-"]);
+    let output = tokio::time::timeout(SUBTITLE_FFMPEG_TIMEOUT, command.output())
+        .await
+        .map_err(|_| AppError::internal("ffmpeg timed out converting subtitle"))?
+        .map_err(|e| AppError::internal(format!("failed to run ffmpeg: {e}")))?;
+    if !output.status.success() {
+        return Err(AppError::internal("ffmpeg failed to convert subtitle"));
+    }
+    Ok(output.stdout)
+}
+
 fn vtt_response(bytes: Vec<u8>) -> Result<Response, AppError> {
     Response::builder()
         .status(StatusCode::OK)
@@ -720,21 +801,20 @@ async fn get_subtitle_track(
     // Sidecar subtitle file?
     let sidecars = db::get_sidecars(&state.pool, id).await?;
     if let Some(sidecar) = sidecars.iter().find(|s| s.index == track) {
+        let path =
+            crate::paths::library_file(&state.pool, item.library_id, FsPath::new(&sidecar.path))
+                .await
+                .map_err(|_| {
+                    AppError::not_found(format!("subtitle track {track} not found for item {id}"))
+                })?;
         if sidecar.is_webvtt() {
-            let bytes = tokio::fs::read(&sidecar.path).await?;
+            let bytes = tokio::fs::read(&path).await.map_err(|_| {
+                AppError::not_found(format!("subtitle track {track} not found for item {id}"))
+            })?;
             return vtt_response(bytes);
         }
-        let output = tokio::process::Command::new("ffmpeg")
-            .args(["-v", "quiet", "-i"])
-            .arg(&sidecar.path)
-            .args(["-f", "webvtt", "-"])
-            .output()
-            .await
-            .map_err(|e| AppError::internal(format!("failed to run ffmpeg: {e}")))?;
-        if !output.status.success() {
-            return Err(AppError::internal("ffmpeg failed to convert subtitle"));
-        }
-        return vtt_response(output.stdout);
+        let bytes = run_subtitle_ffmpeg(&path, None).await?;
+        return vtt_response(bytes);
     }
 
     // Embedded subtitle track?
@@ -745,19 +825,15 @@ async fn get_subtitle_track(
         )));
     }
 
-    let output = tokio::process::Command::new("ffmpeg")
-        .args(["-v", "quiet", "-i"])
-        .arg(&item.file_path)
-        .args(["-map", &format!("0:{track}"), "-f", "webvtt", "-"])
-        .output()
-        .await
-        .map_err(|e| AppError::internal(format!("failed to run ffmpeg: {e}")))?;
-    if !output.status.success() {
-        return Err(AppError::internal(
-            "ffmpeg failed to extract embedded subtitle",
-        ));
-    }
-    vtt_response(output.stdout)
+    let media =
+        crate::paths::library_file(&state.pool, item.library_id, FsPath::new(&item.file_path))
+            .await
+            .map_err(|_| {
+                AppError::not_found(format!("subtitle track {track} not found for item {id}"))
+            })?;
+    let map = format!("0:{track}");
+    let bytes = run_subtitle_ffmpeg(&media, Some(&map)).await?;
+    vtt_response(bytes)
 }
 
 #[cfg(test)]

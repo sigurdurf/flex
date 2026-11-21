@@ -53,7 +53,8 @@ Lint. The Gradle wrapper is committed, and the toolchain versions
 ## Configuring the server URL
 
 The app needs the Flex base URL (scheme + host + port), for example
-`https://media.example.com` or, on a LAN, `http://192.168.1.10:8096`.
+`https://media.example.com` or, in debug builds on a LAN,
+`http://192.168.1.10:8096`.
 
 - In the running app, set it on the login screen / settings field before
   logging in.
@@ -115,25 +116,19 @@ server can kill `ffmpeg` and free the session. See
 
 ## Cleartext traffic and network security
 
-Android blocks cleartext (plain HTTP) by default since API 28. For **LAN
-testing only**, the app ships a `network_security_config` with a cleartext
-exception for local addresses, e.g.:
+Network security policy is split by build type:
 
-```xml
-<network-security-config>
-    <domain-config cleartextTrafficPermitted="true">
-        <domain includeSubdomains="false">192.168.1.10</domain>
-        <domain includeSubdomains="false">10.0.2.2</domain> <!-- emulator host -->
-    </domain-config>
-</network-security-config>
-```
+- **Release builds require HTTPS.**
+  [`android/app/src/main/res/xml/network_security_config.xml`](../android/app/src/main/res/xml/network_security_config.xml)
+  sets `cleartextTrafficPermitted="false"` on `<base-config>`, so release
+  builds will not send credentials or bearer tokens over plain `http://`.
+- **Debug builds allow cleartext HTTP.**
+  [`android/app/src/debug/res/xml/network_security_config.xml`](../android/app/src/debug/res/xml/network_security_config.xml)
+  overrides `<base-config>` with `cleartextTrafficPermitted="true"` so a debug
+  build can talk to a local or LAN Flex server (such as `http://10.0.2.2:8096`
+  from the emulator or `http://192.168.1.10:8096` on a local network) during
+  development.
 
-This exception exists **only** so a developer can reach a server on the local
-network over `http://`. It must be narrow (a concrete IP, never a wildcard) and
-must not be used for production.
-
-**Production must go through the TLS reverse proxy.** Configure the app with an
-`https://` URL and leave cleartext disabled globally. If the deployment also has
-a LAN-facing HTTP listener, keep the cleartext exception scoped to private
-address ranges and never to `0.0.0.0/0`. See [`SECURITY.md`](SECURITY.md) and
+**Production must go through a TLS reverse proxy.** Configure release
+installs with an `https://` URL. See [`SECURITY.md`](SECURITY.md) and
 [`REVERSE_PROXY.md`](REVERSE_PROXY.md).

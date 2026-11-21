@@ -40,9 +40,14 @@ The relevant adversaries are:
 3. **Stolen-token attackers** who obtain one device token. Mitigated by
    individually revocable tokens, per-device metadata (`last_seen_at`) and
    expiry.
-4. **Path-traversal / IDOR attackers** abusing item ids, subtitle track numbers
-   or artwork types. Mitigated by authorising every stream/artwork/subtitle
-   request per user and never concatenating user input into filesystem paths.
+4. **Path-traversal attackers** abusing subtitle language tags, subtitle
+   track numbers or artwork types. Mitigated by a bearer token, the subtitle
+   `language` allowlist `^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8}){0,2}$`, writing
+   sidecars only in the media file's existing directory, and canonicalising
+   stream, artwork, and subtitle paths so they stay inside the item's library
+   root. Symlinks that resolve outside the library are neither indexed nor
+   served. Any authenticated user can read any library item; Flex does not
+   grant access per item.
 5. **Network attackers** on the path to the server. Mitigated by TLS
    termination at the proxy.
 
@@ -61,7 +66,7 @@ and opaque device tokens (per-device, short-lived).
   **Argon2id** (the memory-hard winner of the Password Hashing Competition and
   the current recommendation from OWASP/PHC).
 - Each hash carries its own random salt and parameters; verification is
-  constant-time and transparently upgraded if parameters change.
+  Argon2id. Unknown usernames still run an Argon2id verify against a dummy hash.
 - Argon2id's memory hardness makes GPU/ASIC offline cracking of a stolen
   database far more expensive than SHA-* or bcrypt.
 - Passwords are supplied at account creation (`flex-server user add …` or the
@@ -117,10 +122,35 @@ requires a valid bearer token; the static web client (non-`/api` paths) is
 served unauthenticated. HLS playlist/segment routes are instead authorised by
 the scoped `?t=` session token, and the direct-play stream route accepts either
 a bearer token or a `?t=` token bound to that item. Admin-only routes (user
-management) check `role == admin`. **Streams, artwork and subtitle endpoints are
-authorised per user** — a valid token from a non-admin account is necessary but
-the request is still checked against the item. Do not build custom URL schemes
-that bypass this check.
+management and `POST /api/v1/scan`) check `role == admin`.
+`POST /api/v1/playback/stop` only stops a session owned by the authenticated
+user (`404` if missing, `403` if owned by someone else). **Streams, artwork and
+subtitle endpoints require a bearer token.** Any authenticated user can open
+any item. The file that is opened must still canonicalize inside that item's
+library root. Do not build custom URL schemes that bypass this check.
+
+Ordinary (non-admin) clients do not receive server filesystem paths:
+`MediaItem.file_path` and `Library.path` are returned as empty strings while
+keeping the fields present. Admins still receive the real paths. Subtitle
+download responses do not include the absolute sidecar path.
+
+### Path checks, subprocesses, outbound downloads and CORS
+
+- **Path containment:** Stream, artwork, and subtitle reads canonicalise the
+  target path and verify that it stays inside the item's library root; symlinks
+  that resolve outside the library are neither indexed nor served. Subtitle
+  downloads validate `language` against
+  `^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8}){0,2}$` and write sidecars only inside the
+  media file's existing directory.
+- **`ffmpeg`/`ffprobe` reads:** Subprocesses that read library files are passed
+  `-protocol_whitelist file`. Media probing and subtitle conversion time out
+  after 30 seconds.
+- **OpenSubtitles downloads:** File downloads require `https`, reject private,
+  loopback, and link-local addresses, reject `localhost`, and stop at 5 MiB.
+  A public hostname is not resolved before the request.
+- **CORS:** The server uses `CorsLayer::new()` and does not reflect arbitrary
+  origins, blocking cross-origin browser access while keeping the same-origin
+  web UI and native clients working.
 
 ## Why exposing Flex directly is risky
 
@@ -152,14 +182,16 @@ forwards to Flex on the loopback interface. See
 
 ### Bind to loopback
 
-When behind a proxy on the same host, set:
+Flex binds to `127.0.0.1` (loopback) by default:
 
 ```toml
 host = "127.0.0.1"
 port = 8096
 ```
 
-so the only reachable path is through the proxy. Do **not** forward port 8096
+so the only reachable path when behind a same-host proxy is through the proxy.
+Binding `host = "0.0.0.0"` is an explicit operator choice (for example, for LAN
+access or a container that publishes port 8096). Do **not** forward port 8096
 from your router/firewall. If the proxy runs on another host, bind to a private
 interface and firewall 8096 to the proxy's address only — never the public
 internet.
@@ -194,7 +226,8 @@ limited to the client files to avoid accidental exposure:
 
 Server / application:
 
-- [ ] `host = "127.0.0.1"` when behind a same-host proxy.
+- [ ] Keep the default `host = "127.0.0.1"` when behind a same-host proxy
+      (binding `0.0.0.0` is an explicit operator choice).
 - [ ] Create a dedicated admin with a strong, unique password:
       `flex-server user add admin --admin --password '…'`.
 - [ ] Do **not** leave `FLEX_ADMIN_USER`/`FLEX_ADMIN_PASSWORD` set after first

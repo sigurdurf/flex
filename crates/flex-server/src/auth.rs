@@ -47,6 +47,13 @@ pub fn hash_password(password: &str) -> Result<String, argon2::password_hash::Er
     Ok(hash.to_string())
 }
 
+/// Argon2id PHC string checked when no user row exists.
+///
+/// Login runs this through [`verify_password`] so an unknown username does not
+/// return before the hash. The caller still rejects the attempt. This removes
+/// the cheap reject only; it does not make usernames unenumerable.
+pub const DUMMY_PASSWORD_HASH: &str = "$argon2id$v=19$m=19456,t=2,p=1$FlexDummySaltValueAAAA$OrYqtK9upt8AwMm1CmaLdjozANzge7YUgWiSD+5OxNE";
+
 /// Verify a password against a stored PHC string. Returns `false` on any error,
 /// including a malformed stored hash, so callers cannot learn why it failed.
 pub fn verify_password(password: &str, phc: &str) -> bool {
@@ -313,6 +320,16 @@ mod tests {
         assert!(verify_password("hunter2", &hash));
         assert!(!verify_password("hunter3", &hash));
         assert!(!verify_password("hunter2", "not-a-phc-string"));
+    }
+
+    #[test]
+    fn dummy_password_hash_is_a_real_argon2id_phc() {
+        assert!(DUMMY_PASSWORD_HASH.starts_with("$argon2id$"));
+        assert!(verify_password(
+            "flex-dummy-login-timing",
+            DUMMY_PASSWORD_HASH
+        ));
+        assert!(!verify_password("hunter2", DUMMY_PASSWORD_HASH));
     }
 
     #[test]
