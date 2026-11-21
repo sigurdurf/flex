@@ -201,6 +201,7 @@ struct Session {
     id: String,
     token: String,
     item_id: i64,
+    owner_user_id: i64,
     mode: PlaybackMode,
     stream_kind: StreamKind,
     dir: PathBuf,
@@ -313,20 +314,37 @@ impl SessionManager {
     }
 
     /// Stop a session: kill ffmpeg and delete its directory. Returns whether a
-    /// session existed.
+    /// session existed. Internal cleanup does not check the owner.
     async fn stop(&self, session_id: &str) -> bool {
         let session = {
             let mut sessions = self.sessions.lock().expect("session mutex poisoned");
             sessions.remove(session_id)
         };
-        let Some(mut session) = session else {
+        let Some(session) = session else {
             return false;
         };
-        if let Some(child) = session.child.as_mut() {
-            transcode::kill(child).await;
-        }
-        let _ = tokio::fs::remove_dir_all(&session.dir).await;
+        reap(session).await;
         true
+    }
+
+    /// Stop `session_id` when it belongs to `user_id`.
+    ///
+    /// A missing session is 404. Another user's session is 403 and is left running.
+    async fn stop_for_user(&self, session_id: &str, user_id: i64) -> Result<(), AppError> {
+        let session = {
+            let mut sessions = self.sessions.lock().expect("session mutex poisoned");
+            match sessions.get(session_id) {
+                None => return Err(AppError::not_found("playback session not found")),
+                Some(session) if session.owner_user_id != user_id => {
+                    return Err(AppError::forbidden(
+                        "playback session belongs to another user",
+                    ));
+                }
+                Some(_) => sessions.remove(session_id).expect("session exists"),
+            }
+        };
+        reap(session).await;
+        Ok(())
     }
 
     /// Reclaim sessions idle for longer than `idle`, returning how many.
@@ -356,6 +374,14 @@ impl SessionManager {
         }
         count
     }
+}
+
+/// Kill ffmpeg and delete the session directory.
+async fn reap(mut session: Session) {
+    if let Some(child) = session.child.as_mut() {
+        transcode::kill(child).await;
+    }
+    let _ = tokio::fs::remove_dir_all(&session.dir).await;
 }
 
 // --- Handlers ---------------------------------------------------------------
@@ -415,6 +441,7 @@ pub async fn start(
             id: session_id.clone(),
             token: token.clone(),
             item_id: item.id,
+            owner_user_id: auth.user.id,
             mode,
             stream_kind: StreamKind::File,
             dir: state.sessions.session_dir(&session_id),
@@ -454,6 +481,11 @@ pub async fn start(
         ));
     }
 
+    let input_path =
+        crate::paths::library_file(&state.pool, item.library_id, FsPath::new(&item.file_path))
+            .await?;
+    let input = input_path.to_string_lossy().into_owned();
+
     let caps = &request.capabilities;
     let args = match mode {
         PlaybackMode::Remux => {
@@ -463,7 +495,7 @@ pub async fn start(
                 .map(|v| v.codec.as_str())
                 .unwrap_or("h264");
             let copy_audio = audio_supported(&item, caps);
-            transcode::remux_args(&item.file_path, video_codec, copy_audio, start_ms)
+            transcode::remux_args(&input, video_codec, copy_audio, start_ms)
         }
         _ => {
             let want_hevc = item
@@ -475,7 +507,7 @@ pub async fn start(
             let scale = transcode::scale_filter(caps.max_width, caps.max_height);
             transcode::transcode_args(
                 &state.transcode,
-                &item.file_path,
+                &input,
                 want_hevc,
                 scale.as_deref(),
                 caps.max_bitrate,
@@ -489,6 +521,7 @@ pub async fn start(
         id: session_id.clone(),
         token: token.clone(),
         item_id: item.id,
+        owner_user_id: auth.user.id,
         mode,
         stream_kind: StreamKind::Hls,
         dir: dir.clone(),
@@ -547,11 +580,14 @@ pub async fn start(
 
 /// `POST /api/v1/playback/stop`
 pub async fn stop(
-    _auth: AuthUser,
+    auth: AuthUser,
     State(state): State<AppState>,
     Json(request): Json<StopPlaybackRequest>,
 ) -> Result<StatusCode, AppError> {
-    state.sessions.stop(&request.session_id).await;
+    state
+        .sessions
+        .stop_for_user(&request.session_id, auth.user.id)
+        .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1086,6 +1122,7 @@ mod tests {
             id: id.into(),
             token: token.into(),
             item_id,
+            owner_user_id: 1,
             mode: PlaybackMode::Direct,
             stream_kind: StreamKind::File,
             dir: PathBuf::from("/tmp/flex-test-cache/playback").join(id),
@@ -1123,6 +1160,49 @@ mod tests {
             .unwrap();
         assert_eq!(manager.authorize_stream_token("tok1"), Some(42));
         assert_eq!(manager.authorize_stream_token("nope"), None);
+    }
+
+    #[tokio::test]
+    async fn stop_requires_session_owner() {
+        let manager = manager();
+
+        let mut direct = direct_session("direct", "tok-d", 1);
+        direct.owner_user_id = 10;
+        direct.stream_kind = StreamKind::File;
+        manager.insert_checked(direct).unwrap();
+
+        let mut hls = direct_session("hls", "tok-h", 2);
+        hls.owner_user_id = 11;
+        hls.mode = PlaybackMode::Remux;
+        hls.stream_kind = StreamKind::Hls;
+        manager.insert_checked(hls).unwrap();
+
+        assert!(matches!(
+            manager.stop_for_user("missing", 10).await,
+            Err(AppError::NotFound(_))
+        ));
+        assert!(matches!(
+            manager.stop_for_user("direct", 11).await,
+            Err(AppError::Forbidden(_))
+        ));
+        // The other user's session is still running.
+        assert!(manager.authorize("direct", "tok-d").is_ok());
+        assert!(manager.stop_for_user("direct", 10).await.is_ok());
+        assert!(matches!(
+            manager.authorize("direct", "tok-d"),
+            Err(AppError::NotFound(_))
+        ));
+
+        assert!(matches!(
+            manager.stop_for_user("hls", 10).await,
+            Err(AppError::Forbidden(_))
+        ));
+        assert!(manager.authorize("hls", "tok-h").is_ok());
+        assert!(manager.stop_for_user("hls", 11).await.is_ok());
+        assert!(matches!(
+            manager.authorize("hls", "tok-h"),
+            Err(AppError::NotFound(_))
+        ));
     }
 
     #[test]
